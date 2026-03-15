@@ -1,0 +1,94 @@
+{
+  "builder_name": "parquet",
+  "citation": "",
+  "config_name": "default",
+  "dataset_name": "intellect-math-sft-data",
+  "dataset_size": 4233241300,
+  "description": "",
+  "download_checksums": {
+    "hf://datasets/PrimeIntellect/INTELLECT-MATH-SFT-Data@3b6f550df5b292b781b7426dca7818ca295ad654/data/train-00000-of-00009.parquet": {
+      "num_bytes": 185022765,
+      "checksum": null
+    },
+    "hf://datasets/PrimeIntellect/INTELLECT-MATH-SFT-Data@3b6f550df5b292b781b7426dca7818ca295ad654/data/train-00001-of-00009.parquet": {
+      "num_bytes": 184523489,
+      "checksum": null
+    },
+    "hf://datasets/PrimeIntellect/INTELLECT-MATH-SFT-Data@3b6f550df5b292b781b7426dca7818ca295ad654/data/train-00002-of-00009.parquet": {
+      "num_bytes": 184810850,
+      "checksum": null
+    },
+    "hf://datasets/PrimeIntellect/INTELLECT-MATH-SFT-Data@3b6f550df5b292b781b7426dca7818ca295ad654/data/train-00003-of-00009.parquet": {
+      "num_bytes": 184424174,
+      "checksum": null
+    },
+    "hf://datasets/PrimeIntellect/INTELLECT-MATH-SFT-Data@3b6f550df5b292b781b7426dca7818ca295ad654/data/train-00004-of-00009.parquet": {
+      "num_bytes": 184533840,
+      "checksum": null
+    },
+    "hf://datasets/PrimeIntellect/INTELLECT-MATH-SFT-Data@3b6f550df5b292b781b7426dca7818ca295ad654/data/train-00005-of-00009.parquet": {
+      "num_bytes": 185032208,
+      "checksum": null
+    },
+    "hf://datasets/PrimeIntellect/INTELLECT-MATH-SFT-Data@3b6f550df5b292b781b7426dca7818ca295ad654/data/train-00006-of-00009.parquet": {
+      "num_bytes": 184099020,
+      "checksum": null
+    },
+    "hf://datasets/PrimeIntellect/INTELLECT-MATH-SFT-Data@3b6f550df5b292b781b7426dca7818ca295ad654/data/train-00007-of-00009.parquet": {
+      "num_bytes": 184803724,
+      "checksum": null
+    },
+    "hf://datasets/PrimeIntellect/INTELLECT-MATH-SFT-Data@3b6f550df5b292b781b7426dca7818ca295ad654/data/train-00008-of-00009.parquet": {
+      "num_bytes": 185236659,
+      "checksum": null
+    }
+  },
+  "download_size": 1662486729,
+  "features": {
+    "messages": {
+      "feature": {
+        "content": {
+          "dtype": "string",
+          "_type": "Value"
+        },
+        "role": {
+          "dtype": "string",
+          "_type": "Value"
+        }
+      },
+      "_type": "List"
+    },
+    "ground_truth": {
+      "dtype": "string",
+      "_type": "Value"
+    }
+  },
+  "homepage": "",
+  "license": "",
+  "size_in_bytes": 5895728029,
+  "splits": {
+    "train": {
+      "name": "train",
+      "num_bytes": 4233241300,
+      "num_examples": 733035,
+      "shard_lengths": [
+        86449,
+        87449,
+        87449,
+        87448,
+        87448,
+        87448,
+        87448,
+        86448,
+        35448
+      ],
+      "dataset_name": "intellect-math-sft-data"
+    }
+  },
+  "version": {
+    "version_str": "0.0.0",
+    "major": 0,
+    "minor": 0,
+    "patch": 0
+  }
+}

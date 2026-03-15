@@ -1,0 +1,69 @@
+{
+  "citation": "",
+  "description": "",
+  "features": {
+    "target": {
+      "dtype": "int64",
+      "_type": "Value"
+    },
+    "nums": {
+      "feature": {
+        "dtype": "int64",
+        "_type": "Value"
+      },
+      "_type": "List"
+    },
+    "data_source": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "prompt": {
+      "feature": {
+        "content": {
+          "dtype": "string",
+          "_type": "Value"
+        },
+        "role": {
+          "dtype": "string",
+          "_type": "Value"
+        }
+      },
+      "_type": "List"
+    },
+    "ability": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "reward_model": {
+      "ground_truth": {
+        "numbers": {
+          "feature": {
+            "dtype": "int64",
+            "_type": "Value"
+          },
+          "_type": "List"
+        },
+        "target": {
+          "dtype": "int64",
+          "_type": "Value"
+        }
+      },
+      "style": {
+        "dtype": "string",
+        "_type": "Value"
+      }
+    },
+    "extra_info": {
+      "index": {
+        "dtype": "int64",
+        "_type": "Value"
+      },
+      "split": {
+        "dtype": "string",
+        "_type": "Value"
+      }
+    }
+  },
+  "homepage": "",
+  "license": ""
+}
