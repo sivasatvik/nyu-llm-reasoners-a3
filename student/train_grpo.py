@@ -411,8 +411,12 @@ def main() -> None:
                     out   = get_response_log_probs(
                         model=model, input_ids=ids, labels=lbs, return_token_entropy=False
                     )
-                    lp_list.append(out["log_probs"].detach().cpu())
-            old_log_probs_flat = torch.cat(lp_list, dim=0)  # (rollout_bs, seq)
+                    lp = out["log_probs"].detach().cpu()  # (mb, seq_mb)
+                    # Pad to T so all microbatches share the same seq dimension.
+                    if lp.shape[1] < T:
+                        lp = torch.nn.functional.pad(lp, (0, T - lp.shape[1]), value=0.0)
+                    lp_list.append(lp)
+            old_log_probs_flat = torch.cat(lp_list, dim=0)  # (rollout_bs, T)
 
         # 5. Gradient-accumulation update
         optimizer.zero_grad(set_to_none=True)
