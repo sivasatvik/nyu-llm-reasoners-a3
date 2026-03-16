@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import json
 import math
@@ -177,6 +178,37 @@ def load_policy_into_vllm_instance(policy: PreTrainedModel, llm) -> None:
     llm_model.load_weights(state_dict.items())
 
 
+@contextlib.contextmanager
+def vllm_eval_context(
+    model_id: str,
+    policy: PreTrainedModel,
+    policy_device: str,
+    vllm_device: str,
+    seed: int,
+    gpu_memory_utilization: float,
+):
+    """Context manager for vLLM-based evaluation.
+
+    On a single GPU (policy_device == vllm_device) the policy weights are
+    temporarily moved to CPU so vLLM can claim the full GPU budget.  On a
+    two-GPU setup both models stay on their respective GPUs.
+    """
+    single_gpu = policy_device == vllm_device
+    if single_gpu:
+        policy.to("cpu")
+        torch.cuda.empty_cache()
+
+    llm = init_vllm(model_id, vllm_device, seed, gpu_memory_utilization)
+    load_policy_into_vllm_instance(policy, llm)
+    try:
+        yield llm
+    finally:
+        del llm
+        torch.cuda.empty_cache()
+        if single_gpu:
+            policy.to(policy_device)
+
+
 def evaluate_with_vllm(
     llm,
     prompts: list[str],
@@ -266,7 +298,8 @@ def main() -> None:
     parser.add_argument("--max-eval-examples", type=int, default=256)
     parser.add_argument("--eval-max-tokens", type=int, default=1024)
     parser.add_argument("--policy-device", default="cuda:0")
-    parser.add_argument("--vllm-device", default="cuda:1")
+    parser.add_argument("--vllm-device", default="",
+                        help="Device for vLLM inference. Defaults to cuda:1 if 2+ GPUs are available, else cuda:0.")
     parser.add_argument("--vllm-gpu-memory-utilization", type=float, default=0.85)
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
@@ -276,6 +309,10 @@ def main() -> None:
     parser.add_argument("--wandb-entity", default="")
     parser.add_argument("--save-every-eval", action="store_true")
     args = parser.parse_args()
+
+    # Auto-select vLLM device: prefer cuda:1 (separate from policy) when available.
+    if not args.vllm_device:
+        args.vllm_device = "cuda:1" if torch.cuda.device_count() >= 2 else "cuda:0"
 
     set_seed(args.seed)
     torch.set_float32_matmul_precision("high")
@@ -342,13 +379,6 @@ def main() -> None:
             ],
         )
         writer.writeheader()
-
-    llm = init_vllm(
-        model_id=args.model_id,
-        device=args.vllm_device,
-        seed=args.seed,
-        gpu_memory_utilization=args.vllm_gpu_memory_utilization,
-    )
 
     global_micro_step = 0
     train_step = 0
@@ -420,15 +450,21 @@ def main() -> None:
                 need_eval = (train_step % args.eval_every_steps == 0)
                 if need_eval:
                     model.eval()
-                    load_policy_into_vllm_instance(model, llm)
-
-                    val_metrics = evaluate_with_vllm(
-                        llm=llm,
-                        prompts=math_val_prompts,
-                        ground_truths=math_val_gts,
-                        max_examples=args.max_eval_examples,
-                        max_tokens=args.eval_max_tokens,
-                    )
+                    with vllm_eval_context(
+                        model_id=args.model_id,
+                        policy=model,
+                        policy_device=args.policy_device,
+                        vllm_device=args.vllm_device,
+                        seed=args.seed,
+                        gpu_memory_utilization=args.vllm_gpu_memory_utilization,
+                    ) as llm:
+                        val_metrics = evaluate_with_vllm(
+                            llm=llm,
+                            prompts=math_val_prompts,
+                            ground_truths=math_val_gts,
+                            max_examples=args.max_eval_examples,
+                            max_tokens=args.eval_max_tokens,
+                        )
                     eval_step += 1
 
                     if use_wandb:
@@ -500,22 +536,29 @@ def main() -> None:
         torch_dtype=torch.bfloat16,
     ).to(args.policy_device)
     best_model.eval()
-    load_policy_into_vllm_instance(best_model, llm)
 
-    intellect_test_metrics = evaluate_with_vllm(
-        llm=llm,
-        prompts=intellect_test_prompts,
-        ground_truths=intellect_test_gts,
-        max_examples=args.max_eval_examples,
-        max_tokens=args.eval_max_tokens,
-    )
-    math_test_metrics = evaluate_with_vllm(
-        llm=llm,
-        prompts=math_test_prompts,
-        ground_truths=math_test_gts,
-        max_examples=args.max_eval_examples,
-        max_tokens=args.eval_max_tokens,
-    )
+    with vllm_eval_context(
+        model_id=args.model_id,
+        policy=best_model,
+        policy_device=args.policy_device,
+        vllm_device=args.vllm_device,
+        seed=args.seed,
+        gpu_memory_utilization=args.vllm_gpu_memory_utilization,
+    ) as llm:
+        intellect_test_metrics = evaluate_with_vllm(
+            llm=llm,
+            prompts=intellect_test_prompts,
+            ground_truths=intellect_test_gts,
+            max_examples=args.max_eval_examples,
+            max_tokens=args.eval_max_tokens,
+        )
+        math_test_metrics = evaluate_with_vllm(
+            llm=llm,
+            prompts=math_test_prompts,
+            ground_truths=math_test_gts,
+            max_examples=args.max_eval_examples,
+            max_tokens=args.eval_max_tokens,
+        )
 
     summary = {
         "run_name": run_name,
