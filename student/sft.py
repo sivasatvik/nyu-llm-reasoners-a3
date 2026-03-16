@@ -128,3 +128,26 @@ def get_response_log_probs(
     if return_token_entropy:
         outputs["token_entropy"] = compute_entropy(logits)
     return outputs
+
+
+def masked_normalize(
+    tensor: torch.Tensor,
+    mask: torch.Tensor,
+    normalize_constant: float,
+    dim: int | None = None,
+) -> torch.Tensor:
+    """Sum tensor values over masked positions and normalize by a constant.
+
+    Args:
+        tensor: Tensor to sum and normalize.
+        mask: Boolean/int mask with same shape as tensor. Positions where mask == 1
+            are included in the sum.
+        normalize_constant: Constant divisor for normalization.
+        dim: Dimension to sum along. If None, sum over all dimensions.
+
+    Returns:
+        Normalized masked sum.
+    """
+    masked_tensor = tensor * mask.to(dtype=tensor.dtype)
+    summed = torch.sum(masked_tensor, dim=dim)
+    return summed / normalize_constant
