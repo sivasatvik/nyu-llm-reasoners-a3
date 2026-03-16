@@ -297,6 +297,8 @@ def main() -> None:
     parser.add_argument("--max-train-steps", type=int, default=0)
     parser.add_argument("--max-eval-examples", type=int, default=256)
     parser.add_argument("--eval-max-tokens", type=int, default=1024)
+    parser.add_argument("--max-seq-len", type=int, default=2048,
+                        help="Truncate tokenized sequences to this length before the forward pass.")
     parser.add_argument("--policy-device", default="cuda:0")
     parser.add_argument("--vllm-device", default="",
                         help="Device for vLLM inference. Defaults to cuda:1 if 2+ GPUs are available, else cuda:0.")
@@ -356,6 +358,7 @@ def main() -> None:
         trust_remote_code=True,
         torch_dtype=torch.bfloat16,
     ).to(args.policy_device)
+    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     model.train()
 
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -390,9 +393,11 @@ def main() -> None:
     for epoch in range(args.epochs):
         for prompt_batch, response_batch in iter_microbatches(train_rows, args.micro_batch_size):
             tokenized = tokenize_prompt_and_output(prompt_batch, response_batch, tokenizer)
-            input_ids = tokenized["input_ids"].to(args.policy_device)
-            labels = tokenized["labels"].to(args.policy_device)
-            response_mask = tokenized["response_mask"].to(args.policy_device)
+            # Truncate to max_seq_len to prevent OOM on very long sequences.
+            T = args.max_seq_len
+            input_ids = tokenized["input_ids"][:, :T].to(args.policy_device)
+            labels = tokenized["labels"][:, :T].to(args.policy_device)
+            response_mask = tokenized["response_mask"][:, :T].to(args.policy_device)
 
             out = get_response_log_probs(
                 model=model,
