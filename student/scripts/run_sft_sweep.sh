@@ -7,10 +7,10 @@ set -euo pipefail
 #   MODEL_ID=Qwen/Qwen2.5-Math-1.5B LRS="2e-5 5e-5" GLOBAL_BS="8 16" bash scripts/run_sft_sweep.sh
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-Math-1.5B}
-TRAIN_JSONL=${TRAIN_JSONL:-/data/a5-alignment/MATH/sft.jsonl}
-MATH_VAL_JSONL=${MATH_VAL_JSONL:-/data/a5-alignment/MATH/val.jsonl}
-MATH_TEST_JSONL=${MATH_TEST_JSONL:-/data/a5-alignment/MATH/test.jsonl}
-INTELLECT_TEST_PATH=${INTELLECT_TEST_PATH:-/data/a5-alignment/prime_intellect/test}
+TRAIN_JSONL=${TRAIN_JSONL:-data/intellect_math/train}
+MATH_VAL_JSONL=${MATH_VAL_JSONL:-data/intellect_math/dev}
+MATH_TEST_JSONL=${MATH_TEST_JSONL:-data/intellect_math/test}
+INTELLECT_TEST_PATH=${INTELLECT_TEST_PATH:-data/intellect_math/test}
 
 SIZES=${SIZES:-"128 256 512 1024 full"}
 LRS=${LRS:-"1e-5 2e-5 5e-5"}

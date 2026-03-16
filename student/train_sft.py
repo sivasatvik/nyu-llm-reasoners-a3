@@ -49,9 +49,54 @@ def load_prompt_template(prompt_path: str | Path) -> str:
     return Path(prompt_path).read_text(encoding="utf-8")
 
 
+def _extract_prompt_from_example(ex: dict[str, Any]) -> str:
+    if "prompt" in ex and isinstance(ex["prompt"], str):
+        return ex["prompt"]
+
+    msgs = ex.get("messages", [])
+    if msgs:
+        sys_msg = next((m.get("content", "") for m in msgs if m.get("role") == "system"), "")
+        user_msg = next((m.get("content", "") for m in msgs if m.get("role") == "user"), "")
+        if sys_msg:
+            return sys_msg + "\n\n" + user_msg
+        return user_msg
+
+    return ""
+
+
+def _extract_response_from_example(ex: dict[str, Any]) -> str:
+    if "response" in ex and isinstance(ex["response"], str):
+        return ex["response"]
+
+    msgs = ex.get("messages", [])
+    if msgs:
+        assistant_msg = next((m.get("content", "") for m in msgs if m.get("role") == "assistant"), "")
+        if assistant_msg:
+            return assistant_msg
+
+    return ex.get("ground_truth", ex.get("answer", ""))
+
+
 def load_sft_train_rows(path: str | Path) -> list[SFTRow]:
-    rows = read_jsonl(path)
-    return [SFTRow(prompt=r["prompt"], response=r["response"]) for r in rows]
+    p = Path(path)
+    if p.is_dir():
+        ds = load_from_disk(str(p))
+        return [
+            SFTRow(
+                prompt=_extract_prompt_from_example(ex),
+                response=_extract_response_from_example(ex),
+            )
+            for ex in ds
+        ]
+
+    rows = read_jsonl(p)
+    return [
+        SFTRow(
+            prompt=_extract_prompt_from_example(r),
+            response=_extract_response_from_example(r),
+        )
+        for r in rows
+    ]
 
 
 def load_intellect_split(path: str | None) -> tuple[list[str], list[str]]:
@@ -62,10 +107,7 @@ def load_intellect_split(path: str | None) -> tuple[list[str], list[str]]:
         ds = load_from_disk(str(p))
         prompts, gts = [], []
         for ex in ds:
-            msgs = ex.get("messages", [])
-            sys_msg = next((m["content"] for m in msgs if m.get("role") == "system"), "")
-            user_msg = next((m["content"] for m in msgs if m.get("role") == "user"), "")
-            prompts.append(sys_msg + "\n\n" + user_msg if sys_msg else user_msg)
+            prompts.append(_extract_prompt_from_example(ex))
             gts.append(ex.get("ground_truth", ""))
         return prompts, gts
 
@@ -82,8 +124,14 @@ def load_math_split(path: str | None, prompt_template: str, split: str) -> tuple
         p = Path(path)
         if p.is_dir():
             ds = load_from_disk(str(p))
-            prompts = [prompt_template + "\n\n" + ex["problem"] for ex in ds]
-            gts = [ex["answer"] for ex in ds]
+            prompts, gts = [], []
+            for ex in ds:
+                if "problem" in ex:
+                    prompts.append(prompt_template + "\n\n" + ex["problem"])
+                    gts.append(ex["answer"])
+                else:
+                    prompts.append(_extract_prompt_from_example(ex))
+                    gts.append(ex.get("ground_truth", ex.get("answer", "")))
             return prompts, gts
 
         rows = read_jsonl(p)
@@ -202,10 +250,10 @@ def save_json(path: Path, payload: dict[str, Any]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-id", default="Qwen/Qwen2.5-Math-1.5B")
-    parser.add_argument("--train-jsonl", default="/data/a5-alignment/MATH/sft.jsonl")
-    parser.add_argument("--math-val-jsonl", default="/data/a5-alignment/MATH/val.jsonl")
-    parser.add_argument("--math-test-jsonl", default="/data/a5-alignment/MATH/test.jsonl")
-    parser.add_argument("--intellect-test-path", default="/data/a5-alignment/prime_intellect/test")
+    parser.add_argument("--train-jsonl", default="data/intellect_math/train")
+    parser.add_argument("--math-val-jsonl", default="data/intellect_math/dev")
+    parser.add_argument("--math-test-jsonl", default="data/intellect_math/test")
+    parser.add_argument("--intellect-test-path", default="data/intellect_math/test")
     parser.add_argument("--math-prompt-path", default="student/prompts/intellect.prompt")
     parser.add_argument("--dataset-size", default="full", help="int or 'full'")
     parser.add_argument("--epochs", type=int, default=1)
