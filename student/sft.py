@@ -22,8 +22,9 @@ def masked_mean(
     mask = mask.to(dtype=tensor.dtype)
     masked = tensor * mask
     if dim is None:
-        return masked.sum() / mask.sum().clamp(min=1)
-    return masked.sum(dim=dim) / mask.sum(dim=dim).clamp(min=1)
+        return masked.sum() / mask.sum()  # nan when no elements are masked in
+    count = mask.sum(dim=dim)
+    return masked.sum(dim=dim) / count  # nan where count == 0
 
 
 def tokenize_prompt_and_output(
