@@ -81,3 +81,19 @@ def tokenize_prompt_and_output(
         "labels": labels,
         "response_mask": response_mask,
     }
+
+
+def compute_entropy(logits: torch.Tensor) -> torch.Tensor:
+    """Get per-token entropy over the vocabulary dimension.
+
+    Args:
+        logits: torch.Tensor of shape (batch_size, sequence_length, vocab_size)
+            containing unnormalized logits.
+
+    Returns:
+        torch.Tensor of shape (batch_size, sequence_length) with entropy values.
+    """
+    log_z = torch.logsumexp(logits, dim=-1)
+    probs = torch.exp(logits - log_z.unsqueeze(-1))
+    expected_logits = torch.sum(probs * logits, dim=-1)
+    return log_z - expected_logits
