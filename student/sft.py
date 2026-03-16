@@ -171,12 +171,13 @@ def sft_microbatch_train_step(
         (loss, metadata) where loss is scaled for gradient accumulation.
     """
     nll = -policy_log_probs
-    microbatch_loss = masked_normalize(
+    per_example_loss = masked_normalize(
         tensor=nll,
         mask=response_mask,
         normalize_constant=normalize_constant,
-        dim=None,
+        dim=-1,
     )
+    microbatch_loss = torch.mean(per_example_loss)
     loss = microbatch_loss / gradient_accumulation_steps
     loss.backward()
     metadata: dict[str, torch.Tensor] = {"microbatch_loss": microbatch_loss.detach()}
