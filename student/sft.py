@@ -4,6 +4,28 @@ import torch
 from transformers import PreTrainedTokenizerBase
 
 
+def masked_mean(
+    tensor: torch.Tensor,
+    mask: torch.Tensor,
+    dim: int | None = None,
+) -> torch.Tensor:
+    """Compute the mean of tensor considering only elements where mask == 1.
+
+    Args:
+        tensor: data to average.
+        mask: same shape as tensor; 1 = include, 0 = exclude.
+        dim: dimension to average over. If None, average all masked elements.
+
+    Returns:
+        Masked mean; shape follows tensor.mean(dim) semantics.
+    """
+    mask = mask.to(dtype=tensor.dtype)
+    masked = tensor * mask
+    if dim is None:
+        return masked.sum() / mask.sum().clamp(min=1)
+    return masked.sum(dim=dim) / mask.sum(dim=dim).clamp(min=1)
+
+
 def tokenize_prompt_and_output(
     prompt_strs: list[str],
     output_strs: list[str],
