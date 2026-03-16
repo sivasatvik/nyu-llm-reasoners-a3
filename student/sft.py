@@ -97,3 +97,34 @@ def compute_entropy(logits: torch.Tensor) -> torch.Tensor:
     probs = torch.exp(logits - log_z.unsqueeze(-1))
     expected_logits = torch.sum(probs * logits, dim=-1)
     return log_z - expected_logits
+
+
+def get_response_log_probs(
+    model: torch.nn.Module,
+    input_ids: torch.Tensor,
+    labels: torch.Tensor,
+    return_token_entropy: bool = False,
+) -> dict[str, torch.Tensor]:
+    """Get per-token conditional log-probs and optional token entropy.
+
+    Args:
+        model: Causal language model used for scoring.
+        input_ids: Tensor of shape (batch_size, sequence_length).
+        labels: Tensor of shape (batch_size, sequence_length).
+        return_token_entropy: If True, also return per-token entropy.
+
+    Returns:
+        dict with key "log_probs" and, optionally, "token_entropy".
+    """
+    logits = model(input_ids=input_ids).logits
+    log_probs_all = torch.log_softmax(logits, dim=-1)
+    log_probs = torch.gather(
+        log_probs_all,
+        dim=-1,
+        index=labels.to(logits.device).long().unsqueeze(-1),
+    ).squeeze(-1)
+
+    outputs: dict[str, torch.Tensor] = {"log_probs": log_probs}
+    if return_token_entropy:
+        outputs["token_entropy"] = compute_entropy(logits)
+    return outputs
