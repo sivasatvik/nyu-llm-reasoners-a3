@@ -297,7 +297,7 @@ def main() -> None:
     parser.add_argument("--max-train-steps", type=int, default=0)
     parser.add_argument("--max-eval-examples", type=int, default=256)
     parser.add_argument("--eval-max-tokens", type=int, default=1024)
-    parser.add_argument("--max-seq-len", type=int, default=2048,
+    parser.add_argument("--max-seq-len", type=int, default=256,
                         help="Truncate tokenized sequences to this length before the forward pass.")
     parser.add_argument("--policy-device", default="cuda:0")
     parser.add_argument("--vllm-device", default="",
