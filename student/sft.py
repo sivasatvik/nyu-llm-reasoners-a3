@@ -35,9 +35,8 @@ def tokenize_prompt_and_output(
     """Tokenize the prompt and output strings, and construct a mask that is 1
     for the response tokens and 0 for other tokens (prompt or padding).
 
-    Prompts are tokenized with ``add_special_tokens=True`` (so a BOS token is
-    prepended by default).  Outputs are tokenized with
-    ``add_special_tokens=False`` to avoid inserting a second BOS token.  The
+    Prompts and outputs are tokenized with ``add_special_tokens=False`` so the
+    returned tensors contain only raw text tokens (no implicit BOS token). The
     two token sequences are concatenated, right-padded to the length of the
     longest sequence in the batch, and then the standard language-model shift
     is applied:
@@ -57,9 +56,9 @@ def tokenize_prompt_and_output(
             "labels"         - shape (batch_size, max_len - 1)
             "response_mask"  - shape (batch_size, max_len - 1), dtype long
     """
-    # Tokenize prompts (with BOS) and outputs (no extra BOS)
+    # Tokenize prompts and outputs without implicit BOS/EOS insertions
     prompt_ids_list: list[list[int]] = tokenizer(
-        prompt_strs, add_special_tokens=True
+        prompt_strs, add_special_tokens=False
     ).input_ids
     output_ids_list: list[list[int]] = tokenizer(
         output_strs, add_special_tokens=False
