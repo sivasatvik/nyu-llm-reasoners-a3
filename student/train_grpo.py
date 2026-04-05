@@ -171,31 +171,47 @@ def generate_rollouts(
     min_tokens: int,
     max_tokens: int,
     generation_batch_size: int,
-) -> list[list[str]]:
-    """Return a list-of-lists: [group_size rollouts per prompt]."""
+) -> tuple[list[list[str]], list[list[list[float]]] | None]:
+    """Return [group_size rollouts per prompt], and optional token log-probs."""
     from vllm import SamplingParams
 
     # Repeat each prompt group_size times
     repeated = [p for p in prompts for _ in range(group_size)]
-    params = SamplingParams(
-        temperature=temperature,
-        min_tokens=min_tokens,
-        max_tokens=max_tokens,
-        stop=["</answer>"],
-        n=1,
-    )
+    collect_logprobs = True
+    sampling_kwargs: dict[str, Any] = {
+        "temperature": temperature,
+        "min_tokens": min_tokens,
+        "max_tokens": max_tokens,
+        "stop": ["</answer>"],
+        "n": 1,
+    }
+    if collect_logprobs:
+        sampling_kwargs["logprobs"] = 1
+    params = SamplingParams(**sampling_kwargs)
     texts: list[str] = []
+    old_logprobs_flat: list[list[float]] = []
     step = max(1, generation_batch_size)
     for start in range(0, len(repeated), step):
         chunk = repeated[start:start + step]
         outputs = llm.generate(chunk, params)
-        texts.extend(o.outputs[0].text for o in outputs)
+        for output in outputs:
+            texts.append(output.outputs[0].text)
+            token_logprobs: list[float] = []
+            for token_logprob in output.outputs[0].logprobs or []:
+                if token_logprob:
+                    token_logprobs.append(next(iter(token_logprob.values())).logprob)
+            old_logprobs_flat.append(token_logprobs)
 
     # Group back
     groups: list[list[str]] = []
     for i in range(0, len(texts), group_size):
         groups.append(texts[i:i + group_size])
-    return groups
+
+    old_groups: list[list[list[float]]] = []
+    for i in range(0, len(old_logprobs_flat), group_size):
+        old_groups.append(old_logprobs_flat[i:i + group_size])
+
+    return groups, old_groups
 
 
 def greedy_generate(
@@ -389,231 +405,280 @@ def main() -> None:
 
     pbar = tqdm(total=args.train_steps, desc="GRPO steps")
 
-    while train_step < args.train_steps:
-
-        # 1. Sample prompts
-        sampled = random.choices(train_examples, k=args.n_prompts_per_step)
-        prompts_batch       = [ex.prompt        for ex in sampled]
-        ground_truths_batch = [ex.ground_truth  for ex in sampled]
-
-        # 2. Generate rollouts via vLLM
-        model.eval()
-        with vllm_generate_context(
+    # Keep one vLLM engine alive on dual-GPU runs, and sync policy weights each step.
+    persistent_vllm = args.policy_device != args.vllm_device
+    vllm_ctx = (
+        vllm_generate_context(
             model_id=args.model_id,
             policy=model,
             policy_device=args.policy_device,
             vllm_device=args.vllm_device,
-            seed=args.seed + train_step,
+            seed=args.seed,
             gpu_memory_utilization=args.vllm_gpu_memory_utilization,
-        ) as llm:
-            rollout_groups = generate_rollouts(
-                llm=llm,
-                prompts=prompts_batch,
-                group_size=args.group_size,
-                temperature=args.rollout_temperature,
-                min_tokens=args.min_gen_tokens,
-                max_tokens=args.max_gen_tokens,
-                generation_batch_size=args.rollout_generate_batch_size,
-            )
-        model.train()
-
-        # Flatten lists: (n_prompts * group_size,)
-        flat_prompts  = [p for p, g in zip(prompts_batch, rollout_groups) for _ in g]
-        flat_rollouts = [r for g in rollout_groups     for r in g]
-        flat_gts      = [gt for gt, g in zip(ground_truths_batch, rollout_groups) for _ in g]
-
-        # 3. Rewards + group-normalized advantages
-        advantages, raw_rewards, reward_meta = compute_group_normalized_rewards(
-            reward_fn=question_only_reward_fn,
-            rollout_responses=flat_rollouts,
-            repeated_ground_truths=flat_gts,
-            group_size=args.group_size,
-            advantage_eps=args.advantage_eps,
-            normalize_by_std=args.normalize_by_std,
         )
-        advantages  = advantages.to(args.policy_device)
-        raw_rewards = raw_rewards.to(args.policy_device)
+        if persistent_vllm
+        else contextlib.nullcontext(None)
+    )
 
-        # 4. Optionally compute old_log_probs (needed for grpo_clip)
-        old_log_probs_flat: torch.Tensor | None = None
-        if args.loss_type == "grpo_clip":
-            lp_list: list[torch.Tensor] = []
-            with torch.no_grad():
-                for start in range(0, len(flat_prompts), args.micro_batch_size):
-                    p_mb  = flat_prompts[start:start + args.micro_batch_size]
-                    r_mb  = flat_rollouts[start:start + args.micro_batch_size]
-                    tok   = tokenize_prompt_and_output(p_mb, r_mb, tokenizer)
-                    T     = args.max_seq_len
-                    ids   = tok["input_ids"][:, :T].to(args.policy_device)
-                    lbs   = tok["labels"][:, :T].to(args.policy_device)
-                    out   = get_response_log_probs(
-                        model=model, input_ids=ids, labels=lbs, return_token_entropy=False
-                    )
-                    lp = out["log_probs"].detach().cpu()  # (mb, seq_mb)
-                    # Pad to T so all microbatches share the same seq dimension.
-                    if lp.shape[1] < T:
-                        lp = torch.nn.functional.pad(lp, (0, T - lp.shape[1]), value=0.0)
-                    lp_list.append(lp)
-            old_log_probs_flat = torch.cat(lp_list, dim=0)  # (rollout_bs, T)
+    with vllm_ctx as persistent_llm:
+        while train_step < args.train_steps:
+            # 1. Sample prompts
+            sampled = random.choices(train_examples, k=args.n_prompts_per_step)
+            prompts_batch       = [ex.prompt        for ex in sampled]
+            ground_truths_batch = [ex.ground_truth  for ex in sampled]
 
-        # 5. Gradient-accumulation update
-        optimizer.zero_grad(set_to_none=True)
-        accum_loss   = 0.0
-        micro_count  = 0
-
-        for (
-            mb_prompts, mb_rollouts, mb_gts,
-            mb_adv, mb_raw,
-            mb_old_lp,
-        ) in microbatch_iter(
-            flat_prompts, flat_rollouts, flat_gts,
-            advantages, raw_rewards,
-            old_log_probs_flat,
-            args.micro_batch_size,
-        ):
-            tok          = tokenize_prompt_and_output(mb_prompts, mb_rollouts, tokenizer)
-            T            = args.max_seq_len
-            input_ids    = tok["input_ids"][:, :T].to(args.policy_device)
-            labels       = tok["labels"][:, :T].to(args.policy_device)
-            response_mask = tok["response_mask"][:, :T].to(args.policy_device)
-
-            out = get_response_log_probs(
-                model=model, input_ids=input_ids, labels=labels, return_token_entropy=False
-            )
-            policy_log_probs = out["log_probs"]
-
-            # Align old_log_probs to the same (possibly truncated) seq length
-            if mb_old_lp is not None:
-                old_lp = mb_old_lp[:, :policy_log_probs.shape[1]].to(args.policy_device)
-            else:
-                old_lp = None
-
-            loss, _meta = grpo_microbatch_train_step(
-                policy_log_probs=policy_log_probs,
-                response_mask=response_mask,
-                gradient_accumulation_steps=grad_acc_steps,
-                loss_type=args.loss_type,
-                raw_rewards=mb_raw.unsqueeze(-1) if args.loss_type == "no_baseline" else None,
-                advantages=mb_adv if args.loss_type != "no_baseline" else None,
-                old_log_probs=old_lp,
-                cliprange=args.cliprange,
-            )
-            accum_loss  += float(loss.item())
-            micro_count += 1
-
-        torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-        optimizer.step()
-        train_step += 1
-        pbar.update(1)
-
-        mean_loss    = accum_loss / max(micro_count, 1)
-        mean_reward  = float(reward_meta["mean_reward"])
-        mean_adv     = float(reward_meta["mean_advantage"])
-
-        if use_wandb:
-            import wandb
-            wandb.log({
-                "train_step":         train_step,
-                "train/loss":         mean_loss,
-                "train/mean_reward":  mean_reward,
-                "train/mean_advantage": mean_adv,
-                "train/max_reward":   float(reward_meta["max_reward"]),
-                "train/min_reward":   float(reward_meta["min_reward"]),
-            })
-
-        write_csv_row({
-            "train_step":        train_step,
-            "train_loss":        mean_loss,
-            "train_mean_reward": mean_reward,
-            "train_mean_advantage": mean_adv,
-        })
-
-        # 6. Periodic eval & rollout logging
-        if train_step % args.eval_every == 0:
-            eval_prompts = [ex.prompt       for ex in val_examples[:args.eval_prompts]]
-            eval_gts     = [ex.ground_truth for ex in val_examples[:args.eval_prompts]]
-
+            # 2. Generate rollouts via vLLM
             model.eval()
-            with vllm_generate_context(
-                model_id=args.model_id,
-                policy=model,
-                policy_device=args.policy_device,
-                vllm_device=args.vllm_device,
-                seed=args.seed,
-                gpu_memory_utilization=args.vllm_gpu_memory_utilization,
-            ) as llm:
-                eval_texts = greedy_generate(
-                    llm,
-                    eval_prompts,
+            if persistent_llm is None:
+                with vllm_generate_context(
+                    model_id=args.model_id,
+                    policy=model,
+                    policy_device=args.policy_device,
+                    vllm_device=args.vllm_device,
+                    seed=args.seed + train_step,
+                    gpu_memory_utilization=args.vllm_gpu_memory_utilization,
+                ) as llm:
+                    load_policy_into_vllm_instance(model, llm)
+                    rollout_groups, rollout_old_logprob_groups = generate_rollouts(
+                        llm=llm,
+                        prompts=prompts_batch,
+                        group_size=args.group_size,
+                        temperature=args.rollout_temperature,
+                        min_tokens=args.min_gen_tokens,
+                        max_tokens=args.max_gen_tokens,
+                        generation_batch_size=args.rollout_generate_batch_size,
+                    )
+            else:
+                load_policy_into_vllm_instance(model, persistent_llm)
+                rollout_groups, rollout_old_logprob_groups = generate_rollouts(
+                    llm=persistent_llm,
+                    prompts=prompts_batch,
+                    group_size=args.group_size,
+                    temperature=args.rollout_temperature,
                     min_tokens=args.min_gen_tokens,
                     max_tokens=args.max_gen_tokens,
-                    generation_batch_size=args.eval_generate_batch_size,
+                    generation_batch_size=args.rollout_generate_batch_size,
                 )
             model.train()
 
-            correct = 0; fmt_only = 0; neither = 0
-            for txt, gt in zip(eval_texts, eval_gts):
-                r = question_only_reward_fn(txt, gt)
-                fr, ar = r["format_reward"], r["answer_reward"]
-                if fr == 1.0 and ar == 1.0:
-                    correct += 1
-                elif fr == 1.0:
-                    fmt_only += 1
-                else:
-                    neither += 1
+            # Flatten lists: (n_prompts * group_size,)
+            flat_prompts  = [p for p, g in zip(prompts_batch, rollout_groups) for _ in g]
+            flat_rollouts = [r for g in rollout_groups     for r in g]
+            flat_gts      = [gt for gt, g in zip(ground_truths_batch, rollout_groups) for _ in g]
+            flat_old_token_log_probs = [lp for g in rollout_old_logprob_groups for lp in g]
 
-            acc = correct / len(eval_texts)
-            eval_step += 1
-            print(
-                f"\n[eval step {eval_step} | train step {train_step}] "
-                f"acc={acc:.3f}  correct={correct}  fmt_only={fmt_only}  neither={neither}"
+            # 3. Rewards + group-normalized advantages
+            advantages, raw_rewards, reward_meta = compute_group_normalized_rewards(
+                reward_fn=question_only_reward_fn,
+                rollout_responses=flat_rollouts,
+                repeated_ground_truths=flat_gts,
+                group_size=args.group_size,
+                advantage_eps=args.advantage_eps,
+                normalize_by_std=args.normalize_by_std,
             )
+            advantages  = advantages.to(args.policy_device)
+            raw_rewards = raw_rewards.to(args.policy_device)
 
-            # Log a few example rollouts from the current training batch
-            print(f"\n--- Example rollouts (train_step={train_step}) ---")
-            for i in range(min(args.n_example_rollouts, len(flat_rollouts))):
-                reward_val = float(raw_rewards[i].item())
-                print(f"  [Prompt #{i}] {flat_prompts[i][-120:]!r}")
-                print(f"  [GT]      {flat_gts[i]!r}")
-                print(f"  [Rollout] {flat_rollouts[i][:300]!r}")
-                print(f"  [Reward]  {reward_val:.2f}\n")
-            rollout_log.append({
-                "train_step": train_step,
-                "examples": [
-                    {
-                        "prompt":  flat_prompts[i][-300:],
-                        "gt":      flat_gts[i],
-                        "rollout": flat_rollouts[i][:600],
-                        "reward":  float(raw_rewards[i].item()),
-                    }
-                    for i in range(min(args.n_example_rollouts, len(flat_rollouts)))
-                ],
-            })
+            # 4. Optionally build old_log_probs from vLLM token logprobs (for grpo_clip)
+            old_log_probs_flat: torch.Tensor | None = None
+            if args.loss_type == "grpo_clip":
+                lp_list: list[torch.Tensor] = []
+                for start in range(0, len(flat_prompts), args.micro_batch_size):
+                    p_mb = flat_prompts[start:start + args.micro_batch_size]
+                    r_mb = flat_rollouts[start:start + args.micro_batch_size]
+                    tok = tokenize_prompt_and_output(p_mb, r_mb, tokenizer)
+
+                    T = args.max_seq_len
+                    response_mask_mb = tok["response_mask"][:, :T]
+                    mb, seq_len = response_mask_mb.shape
+                    old_lp_mb = torch.zeros(mb, seq_len, dtype=torch.float32)
+
+                    for i in range(mb):
+                        old_tokens = flat_old_token_log_probs[start + i]
+                        response_positions = torch.nonzero(
+                            response_mask_mb[i], as_tuple=False
+                        ).squeeze(-1)
+                        n = min(int(response_positions.numel()), len(old_tokens))
+                        if n > 0:
+                            old_lp_mb[i, response_positions[:n]] = torch.tensor(
+                                old_tokens[:n], dtype=torch.float32
+                            )
+
+                    if seq_len < T:
+                        old_lp_mb = torch.nn.functional.pad(old_lp_mb, (0, T - seq_len), value=0.0)
+                    lp_list.append(old_lp_mb)
+
+                old_log_probs_flat = torch.cat(lp_list, dim=0)  # (rollout_bs, T)
+
+            # 5. Gradient-accumulation update
+            optimizer.zero_grad(set_to_none=True)
+            accum_loss   = 0.0
+            micro_count  = 0
+
+            for (
+                mb_prompts, mb_rollouts, mb_gts,
+                mb_adv, mb_raw,
+                mb_old_lp,
+            ) in microbatch_iter(
+                flat_prompts, flat_rollouts, flat_gts,
+                advantages, raw_rewards,
+                old_log_probs_flat,
+                args.micro_batch_size,
+            ):
+                tok          = tokenize_prompt_and_output(mb_prompts, mb_rollouts, tokenizer)
+                T            = args.max_seq_len
+                input_ids    = tok["input_ids"][:, :T].to(args.policy_device)
+                labels       = tok["labels"][:, :T].to(args.policy_device)
+                response_mask = tok["response_mask"][:, :T].to(args.policy_device)
+
+                out = get_response_log_probs(
+                    model=model, input_ids=input_ids, labels=labels, return_token_entropy=False
+                )
+                policy_log_probs = out["log_probs"]
+
+                # Align old_log_probs to the same (possibly truncated) seq length
+                if mb_old_lp is not None:
+                    old_lp = mb_old_lp[:, :policy_log_probs.shape[1]].to(args.policy_device)
+                else:
+                    old_lp = None
+
+                loss, _meta = grpo_microbatch_train_step(
+                    policy_log_probs=policy_log_probs,
+                    response_mask=response_mask,
+                    gradient_accumulation_steps=grad_acc_steps,
+                    loss_type=args.loss_type,
+                    raw_rewards=mb_raw.unsqueeze(-1) if args.loss_type == "no_baseline" else None,
+                    advantages=mb_adv if args.loss_type != "no_baseline" else None,
+                    old_log_probs=old_lp,
+                    cliprange=args.cliprange,
+                )
+                accum_loss  += float(loss.item())
+                micro_count += 1
+
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            optimizer.step()
+            train_step += 1
+            pbar.update(1)
+
+            mean_loss    = accum_loss / max(micro_count, 1)
+            mean_reward  = float(reward_meta["mean_reward"])
+            mean_adv     = float(reward_meta["mean_advantage"])
 
             if use_wandb:
                 import wandb
                 wandb.log({
-                    "eval_step":        eval_step,
-                    "eval/accuracy":    acc,
-                    "eval/correct":     correct,
-                    "eval/fmt_only":    fmt_only,
-                    "eval/neither":     neither,
+                    "train_step":         train_step,
+                    "train/loss":         mean_loss,
+                    "train/mean_reward":  mean_reward,
+                    "train/mean_advantage": mean_adv,
+                    "train/max_reward":   float(reward_meta["max_reward"]),
+                    "train/min_reward":   float(reward_meta["min_reward"]),
                 })
 
             write_csv_row({
-                "eval_step":    eval_step,
-                "eval_accuracy": acc,
-                "eval_correct":  correct,
-                "eval_format_only": fmt_only,
-                "eval_neither":  neither,
+                "train_step":        train_step,
+                "train_loss":        mean_loss,
+                "train_mean_reward": mean_reward,
+                "train_mean_advantage": mean_adv,
             })
 
-            if acc > best_val_acc:
-                best_val_acc = acc
-                best_ckpt    = ckpt_dir / "best"
-                model.save_pretrained(best_ckpt)
-                tokenizer.save_pretrained(best_ckpt)
-                print(f"  ✓ new best val acc = {best_val_acc:.3f} → saved to {best_ckpt}")
+            # 6. Periodic eval & rollout logging
+            if train_step % args.eval_every == 0:
+                eval_prompts = [ex.prompt       for ex in val_examples[:args.eval_prompts]]
+                eval_gts     = [ex.ground_truth for ex in val_examples[:args.eval_prompts]]
+
+                model.eval()
+                if persistent_llm is None:
+                    with vllm_generate_context(
+                        model_id=args.model_id,
+                        policy=model,
+                        policy_device=args.policy_device,
+                        vllm_device=args.vllm_device,
+                        seed=args.seed,
+                        gpu_memory_utilization=args.vllm_gpu_memory_utilization,
+                    ) as llm:
+                        load_policy_into_vllm_instance(model, llm)
+                        eval_texts = greedy_generate(
+                            llm,
+                            eval_prompts,
+                            min_tokens=args.min_gen_tokens,
+                            max_tokens=args.max_gen_tokens,
+                            generation_batch_size=args.eval_generate_batch_size,
+                        )
+                else:
+                    load_policy_into_vllm_instance(model, persistent_llm)
+                    eval_texts = greedy_generate(
+                        persistent_llm,
+                        eval_prompts,
+                        min_tokens=args.min_gen_tokens,
+                        max_tokens=args.max_gen_tokens,
+                        generation_batch_size=args.eval_generate_batch_size,
+                    )
+                model.train()
+
+                correct = 0; fmt_only = 0; neither = 0
+                for txt, gt in zip(eval_texts, eval_gts):
+                    r = question_only_reward_fn(txt, gt)
+                    fr, ar = r["format_reward"], r["answer_reward"]
+                    if fr == 1.0 and ar == 1.0:
+                        correct += 1
+                    elif fr == 1.0:
+                        fmt_only += 1
+                    else:
+                        neither += 1
+
+                acc = correct / len(eval_texts)
+                eval_step += 1
+                print(
+                    f"\n[eval step {eval_step} | train step {train_step}] "
+                    f"acc={acc:.3f}  correct={correct}  fmt_only={fmt_only}  neither={neither}"
+                )
+
+                # Log a few example rollouts from the current training batch
+                print(f"\n--- Example rollouts (train_step={train_step}) ---")
+                for i in range(min(args.n_example_rollouts, len(flat_rollouts))):
+                    reward_val = float(raw_rewards[i].item())
+                    print(f"  [Prompt #{i}] {flat_prompts[i][-120:]!r}")
+                    print(f"  [GT]      {flat_gts[i]!r}")
+                    print(f"  [Rollout] {flat_rollouts[i][:300]!r}")
+                    print(f"  [Reward]  {reward_val:.2f}\n")
+                rollout_log.append({
+                    "train_step": train_step,
+                    "examples": [
+                        {
+                            "prompt":  flat_prompts[i][-300:],
+                            "gt":      flat_gts[i],
+                            "rollout": flat_rollouts[i][:600],
+                            "reward":  float(raw_rewards[i].item()),
+                        }
+                        for i in range(min(args.n_example_rollouts, len(flat_rollouts)))
+                    ],
+                })
+
+                if use_wandb:
+                    import wandb
+                    wandb.log({
+                        "eval_step":        eval_step,
+                        "eval/accuracy":    acc,
+                        "eval/correct":     correct,
+                        "eval/fmt_only":    fmt_only,
+                        "eval/neither":     neither,
+                    })
+
+                write_csv_row({
+                    "eval_step":    eval_step,
+                    "eval_accuracy": acc,
+                    "eval_correct":  correct,
+                    "eval_format_only": fmt_only,
+                    "eval_neither":  neither,
+                })
+
+                if acc > best_val_acc:
+                    best_val_acc = acc
+                    best_ckpt    = ckpt_dir / "best"
+                    model.save_pretrained(best_ckpt)
+                    tokenizer.save_pretrained(best_ckpt)
+                    print(f"  ✓ new best val acc = {best_val_acc:.3f} → saved to {best_ckpt}")
 
     pbar.close()
 
