@@ -277,7 +277,7 @@ def main() -> None:
     parser.add_argument("--policy-device", default="cuda:0")
     parser.add_argument("--vllm-device",   default="",
                         help="Defaults to cuda:1 if 2+ GPUs, else cuda:0.")
-    parser.add_argument("--vllm-gpu-memory-utilization", type=float, default=0.8)
+    parser.add_argument("--vllm-gpu-memory-utilization", type=float, default=0.6)
     # Logging
     parser.add_argument("--output-dir",    default="outputs/grpo")
     parser.add_argument("--run-name",      default="")
