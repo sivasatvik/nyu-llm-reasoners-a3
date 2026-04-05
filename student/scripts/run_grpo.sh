@@ -19,15 +19,16 @@ TRAIN_PATH="${TRAIN_PATH:-data/countdown/dataset/train}"
 VAL_PATH="${VAL_PATH:-data/countdown/dataset/dev}"
 PROMPT_PATH="${PROMPT_PATH:-student/prompts/countdown.prompt}"
 MODEL_ID="${MODEL_ID:-Qwen/Qwen2.5-Math-1.5B}"
-LOSS_TYPE="${LOSS_TYPE:-grpo_clip}"
-TRAIN_STEPS="${TRAIN_STEPS:-500}"
-N_PROMPTS="${N_PROMPTS:-8}"
+LOSS_TYPE="${LOSS_TYPE:-reinforce_with_baseline}"
+TRAIN_STEPS="${TRAIN_STEPS:-200}"
+N_PROMPTS="${N_PROMPTS:-2}"
 GROUP_SIZES="${GROUP_SIZES:-8}"
-LRS="${LRS:-1e-6}"
+LRS="${LRS:-1e-5}"
 MICRO_BS="${MICRO_BS:-4}"
 EVAL_EVERY="${EVAL_EVERY:-50}"
 MAX_SEQ_LEN="${MAX_SEQ_LEN:-1024}"
-MAX_GEN_TOKENS="${MAX_GEN_TOKENS:-512}"
+MIN_GEN_TOKENS="${MIN_GEN_TOKENS:-4}"
+MAX_GEN_TOKENS="${MAX_GEN_TOKENS:-1024}"
 WANDB_PROJECT="${WANDB_PROJECT:-nyu-llm-reasoners-a3-grpo}"
 WANDB_ENTITY="${WANDB_ENTITY:-sm12779-new-york-university}"
 OUTPUT_DIR="${OUTPUT_DIR:-outputs/grpo}"
@@ -55,6 +56,7 @@ for GS in ${GROUP_SIZES}; do
       --lr                "${LR}" \
       --eval-every        "${EVAL_EVERY}" \
       --max-seq-len       "${MAX_SEQ_LEN}" \
+      --min-gen-tokens    "${MIN_GEN_TOKENS}" \
       --max-gen-tokens    "${MAX_GEN_TOKENS}" \
       --run-name          "${RUN_NAME}" \
       --output-dir        "${OUTPUT_DIR}" \

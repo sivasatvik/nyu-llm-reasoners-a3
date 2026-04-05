@@ -168,6 +168,7 @@ def generate_rollouts(
     prompts: list[str],
     group_size: int,
     temperature: float,
+    min_tokens: int,
     max_tokens: int,
 ) -> list[list[str]]:
     """Return a list-of-lists: [group_size rollouts per prompt]."""
@@ -175,7 +176,13 @@ def generate_rollouts(
 
     # Repeat each prompt group_size times
     repeated = [p for p in prompts for _ in range(group_size)]
-    params = SamplingParams(temperature=temperature, max_tokens=max_tokens, n=1)
+    params = SamplingParams(
+        temperature=temperature,
+        min_tokens=min_tokens,
+        max_tokens=max_tokens,
+        stop=["</answer>"],
+        n=1,
+    )
     outputs = llm.generate(repeated, params)
     texts = [o.outputs[0].text for o in outputs]
 
@@ -186,9 +193,14 @@ def generate_rollouts(
     return groups
 
 
-def greedy_generate(llm, prompts: list[str], max_tokens: int) -> list[str]:
+def greedy_generate(llm, prompts: list[str], min_tokens: int, max_tokens: int) -> list[str]:
     from vllm import SamplingParams
-    params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
+    params = SamplingParams(
+        temperature=0.0,
+        min_tokens=min_tokens,
+        max_tokens=max_tokens,
+        stop=["</answer>"],
+    )
     outputs = llm.generate(prompts, params)
     return [o.outputs[0].text for o in outputs]
 
@@ -234,27 +246,28 @@ def main() -> None:
     # Model
     parser.add_argument("--model-id",     default="Qwen/Qwen2.5-Math-1.5B")
     # GRPO hyper-parameters
-    parser.add_argument("--loss-type",    default="grpo_clip",
+    parser.add_argument("--loss-type",    default="reinforce_with_baseline",
                         choices=["no_baseline", "reinforce_with_baseline", "grpo_clip"])
     parser.add_argument("--group-size",   type=int,   default=8)
     parser.add_argument("--cliprange",    type=float, default=0.2)
     parser.add_argument("--normalize-by-std", action="store_true", default=True)
     parser.add_argument("--advantage-eps",    type=float, default=1e-6)
     # Batching
-    parser.add_argument("--n-prompts-per-step",  type=int, default=8,
+    parser.add_argument("--n-prompts-per-step",  type=int, default=2,
                         help="Number of distinct prompts to sample per training step.")
     parser.add_argument("--micro-batch-size",    type=int, default=4)
-    parser.add_argument("--global-batch-size",   type=int, default=0,
+    parser.add_argument("--global-batch-size",   type=int, default=64,
                         help="If 0, defaults to n_prompts_per_step * group_size.")
-    parser.add_argument("--train-steps",         type=int, default=500)
+    parser.add_argument("--train-steps",         type=int, default=200)
     # Optimiser
-    parser.add_argument("--lr",           type=float, default=1e-6)
+    parser.add_argument("--lr",           type=float, default=1e-5)
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--grad-clip",    type=float, default=1.0)
     parser.add_argument("--max-seq-len",  type=int,   default=1024)
     # Generation
     parser.add_argument("--rollout-temperature", type=float, default=0.7)
-    parser.add_argument("--max-gen-tokens",      type=int,   default=512)
+    parser.add_argument("--min-gen-tokens",      type=int,   default=4)
+    parser.add_argument("--max-gen-tokens",      type=int,   default=1024)
     # Eval
     parser.add_argument("--eval-every",       type=int, default=50)
     parser.add_argument("--eval-prompts",     type=int, default=64)
@@ -264,7 +277,7 @@ def main() -> None:
     parser.add_argument("--policy-device", default="cuda:0")
     parser.add_argument("--vllm-device",   default="",
                         help="Defaults to cuda:1 if 2+ GPUs, else cuda:0.")
-    parser.add_argument("--vllm-gpu-memory-utilization", type=float, default=0.85)
+    parser.add_argument("--vllm-gpu-memory-utilization", type=float, default=0.8)
     # Logging
     parser.add_argument("--output-dir",    default="outputs/grpo")
     parser.add_argument("--run-name",      default="")
@@ -340,7 +353,12 @@ def main() -> None:
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     model.train()
 
-    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = AdamW(
+        model.parameters(),
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+        betas=(0.9, 0.95),
+    )
 
     # ---- training loop -----------------------------------------------------
     train_step = 0
@@ -375,6 +393,7 @@ def main() -> None:
                 prompts=prompts_batch,
                 group_size=args.group_size,
                 temperature=args.rollout_temperature,
+                min_tokens=args.min_gen_tokens,
                 max_tokens=args.max_gen_tokens,
             )
         model.train()
@@ -504,7 +523,12 @@ def main() -> None:
                 seed=args.seed,
                 gpu_memory_utilization=args.vllm_gpu_memory_utilization,
             ) as llm:
-                eval_texts = greedy_generate(llm, eval_prompts, max_tokens=args.max_gen_tokens)
+                eval_texts = greedy_generate(
+                    llm,
+                    eval_prompts,
+                    min_tokens=args.min_gen_tokens,
+                    max_tokens=args.max_gen_tokens,
+                )
             model.train()
 
             correct = 0; fmt_only = 0; neither = 0
