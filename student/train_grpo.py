@@ -21,6 +21,7 @@ import contextlib
 import csv
 import json
 import random
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -33,7 +34,6 @@ from torch.optim import AdamW
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
 
-from student.drgrpo_grader import question_only_reward_fn
 from student.grpo import compute_group_normalized_rewards, grpo_microbatch_train_step
 from student.sft import get_response_log_probs, tokenize_prompt_and_output
 
@@ -61,6 +61,55 @@ def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
             if line:
                 rows.append(json.loads(line))
     return rows
+
+
+_NUMBER_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
+
+
+def _extract_countdown_prediction(response: str) -> float | None:
+    """Extract a final numeric prediction from model output for Countdown.
+
+    Priority:
+    1) Last value on the right-hand side of an equation ("= x")
+    2) Last numeric token in the <answer> block or full response
+    """
+    text = response
+    m = re.search(r"<answer>(.*?)(</answer>|$)", response, flags=re.IGNORECASE | re.DOTALL)
+    if m:
+        text = m.group(1)
+
+    eq_matches = re.findall(r"=\s*([-+]?\d+(?:\.\d+)?)", text)
+    if eq_matches:
+        try:
+            return float(eq_matches[-1])
+        except ValueError:
+            pass
+
+    nums = _NUMBER_RE.findall(text)
+    if nums:
+        try:
+            return float(nums[-1])
+        except ValueError:
+            return None
+    return None
+
+
+def countdown_reward_fn(response: str, ground_truth: str | int | float) -> dict[str, float]:
+    pred = _extract_countdown_prediction(response)
+    if pred is None:
+        return {"format_reward": 0.0, "answer_reward": 0.0, "reward": 0.0}
+
+    try:
+        gt = float(ground_truth)
+    except (TypeError, ValueError):
+        return {"format_reward": 1.0, "answer_reward": 0.0, "reward": 0.0}
+
+    is_correct = abs(pred - gt) < 1e-6
+    return {
+        "format_reward": 1.0,
+        "answer_reward": 1.0 if is_correct else 0.0,
+        "reward": 1.0 if is_correct else 0.0,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -469,7 +518,7 @@ def main() -> None:
 
             # 3. Rewards + group-normalized advantages
             advantages, raw_rewards, reward_meta = compute_group_normalized_rewards(
-                reward_fn=question_only_reward_fn,
+                reward_fn=countdown_reward_fn,
                 rollout_responses=flat_rollouts,
                 repeated_ground_truths=flat_gts,
                 group_size=args.group_size,
@@ -618,7 +667,7 @@ def main() -> None:
 
                 correct = 0; fmt_only = 0; neither = 0
                 for txt, gt in zip(eval_texts, eval_gts):
-                    r = question_only_reward_fn(txt, gt)
+                    r = countdown_reward_fn(txt, gt)
                     fr, ar = r["format_reward"], r["answer_reward"]
                     if fr == 1.0 and ar == 1.0:
                         correct += 1
