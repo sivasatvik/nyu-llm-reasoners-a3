@@ -26,9 +26,13 @@ GROUP_SIZES="${GROUP_SIZES:-8}"
 LRS="${LRS:-1e-5}"
 MICRO_BS="${MICRO_BS:-1}"
 EVAL_EVERY="${EVAL_EVERY:-50}"
+EVAL_PROMPTS="${EVAL_PROMPTS:-16}"
 MAX_SEQ_LEN="${MAX_SEQ_LEN:-512}"
 MIN_GEN_TOKENS="${MIN_GEN_TOKENS:-4}"
 MAX_GEN_TOKENS="${MAX_GEN_TOKENS:-256}"
+ROLLOUT_GEN_BS="${ROLLOUT_GEN_BS:-4}"
+EVAL_GEN_BS="${EVAL_GEN_BS:-8}"
+VLLM_GPU_MEM_UTIL="${VLLM_GPU_MEM_UTIL:-0.6}"
 WANDB_PROJECT="${WANDB_PROJECT:-nyu-llm-reasoners-a3-grpo}"
 WANDB_ENTITY="${WANDB_ENTITY:-sm12779-new-york-university}"
 OUTPUT_DIR="${OUTPUT_DIR:-outputs/grpo}"
@@ -55,9 +59,13 @@ for GS in ${GROUP_SIZES}; do
       --micro-batch-size  "${MICRO_BS}" \
       --lr                "${LR}" \
       --eval-every        "${EVAL_EVERY}" \
+      --eval-prompts      "${EVAL_PROMPTS}" \
       --max-seq-len       "${MAX_SEQ_LEN}" \
       --min-gen-tokens    "${MIN_GEN_TOKENS}" \
       --max-gen-tokens    "${MAX_GEN_TOKENS}" \
+      --rollout-generate-batch-size "${ROLLOUT_GEN_BS}" \
+      --eval-generate-batch-size    "${EVAL_GEN_BS}" \
+      --vllm-gpu-memory-utilization "${VLLM_GPU_MEM_UTIL}" \
       --run-name          "${RUN_NAME}" \
       --output-dir        "${OUTPUT_DIR}" \
       --wandb-project     "${WANDB_PROJECT}" \

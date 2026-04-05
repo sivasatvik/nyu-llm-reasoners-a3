@@ -170,6 +170,7 @@ def generate_rollouts(
     temperature: float,
     min_tokens: int,
     max_tokens: int,
+    generation_batch_size: int,
 ) -> list[list[str]]:
     """Return a list-of-lists: [group_size rollouts per prompt]."""
     from vllm import SamplingParams
@@ -183,8 +184,12 @@ def generate_rollouts(
         stop=["</answer>"],
         n=1,
     )
-    outputs = llm.generate(repeated, params)
-    texts = [o.outputs[0].text for o in outputs]
+    texts: list[str] = []
+    step = max(1, generation_batch_size)
+    for start in range(0, len(repeated), step):
+        chunk = repeated[start:start + step]
+        outputs = llm.generate(chunk, params)
+        texts.extend(o.outputs[0].text for o in outputs)
 
     # Group back
     groups: list[list[str]] = []
@@ -193,7 +198,13 @@ def generate_rollouts(
     return groups
 
 
-def greedy_generate(llm, prompts: list[str], min_tokens: int, max_tokens: int) -> list[str]:
+def greedy_generate(
+    llm,
+    prompts: list[str],
+    min_tokens: int,
+    max_tokens: int,
+    generation_batch_size: int,
+) -> list[str]:
     from vllm import SamplingParams
     params = SamplingParams(
         temperature=0.0,
@@ -201,8 +212,13 @@ def greedy_generate(llm, prompts: list[str], min_tokens: int, max_tokens: int) -
         max_tokens=max_tokens,
         stop=["</answer>"],
     )
-    outputs = llm.generate(prompts, params)
-    return [o.outputs[0].text for o in outputs]
+    texts: list[str] = []
+    step = max(1, generation_batch_size)
+    for start in range(0, len(prompts), step):
+        chunk = prompts[start:start + step]
+        outputs = llm.generate(chunk, params)
+        texts.extend(o.outputs[0].text for o in outputs)
+    return texts
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +284,8 @@ def main() -> None:
     parser.add_argument("--rollout-temperature", type=float, default=0.7)
     parser.add_argument("--min-gen-tokens",      type=int,   default=4)
     parser.add_argument("--max-gen-tokens",      type=int,   default=1024)
+    parser.add_argument("--rollout-generate-batch-size", type=int, default=4)
+    parser.add_argument("--eval-generate-batch-size",    type=int, default=8)
     # Eval
     parser.add_argument("--eval-every",       type=int, default=50)
     parser.add_argument("--eval-prompts",     type=int, default=64)
@@ -395,6 +413,7 @@ def main() -> None:
                 temperature=args.rollout_temperature,
                 min_tokens=args.min_gen_tokens,
                 max_tokens=args.max_gen_tokens,
+                generation_batch_size=args.rollout_generate_batch_size,
             )
         model.train()
 
@@ -528,6 +547,7 @@ def main() -> None:
                     eval_prompts,
                     min_tokens=args.min_gen_tokens,
                     max_tokens=args.max_gen_tokens,
+                    generation_batch_size=args.eval_generate_batch_size,
                 )
             model.train()
 
