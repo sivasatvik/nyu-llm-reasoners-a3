@@ -152,7 +152,14 @@ def load_math_split(path: str | None, prompt_template: str, split: str) -> tuple
     return prompts, gts
 
 
-def init_vllm(model_id: str, device: str, seed: int, gpu_memory_utilization: float = 0.85):
+def init_vllm(
+    model_id: str,
+    device: str,
+    seed: int,
+    gpu_memory_utilization: float = 0.85,
+    max_model_len: int | None = None,
+    max_num_seqs: int | None = None,
+):
     from vllm import LLM
     from vllm.model_executor import set_random_seed as vllm_set_random_seed
 
@@ -162,14 +169,41 @@ def init_vllm(model_id: str, device: str, seed: int, gpu_memory_utilization: flo
         "vllm.worker.worker.Worker._assert_memory_footprint_increased_during_profiling",
         return_value=None,
     )
-    with world_size_patch, profiling_patch:
-        return LLM(
-            model=model_id,
-            device=device,
-            dtype=torch.bfloat16,
-            enable_prefix_caching=True,
-            gpu_memory_utilization=gpu_memory_utilization,
-        )
+    utils_try = [gpu_memory_utilization, 0.75, 0.65, 0.55]
+    seen: set[float] = set()
+    tried_utils: list[float] = []
+
+    for util in utils_try:
+        util = float(util)
+        if util in seen:
+            continue
+        seen.add(util)
+        tried_utils.append(util)
+
+        if str(device).startswith("cuda"):
+            torch.cuda.empty_cache()
+
+        with world_size_patch, profiling_patch:
+            try:
+                kwargs: dict[str, Any] = {
+                    "model": model_id,
+                    "device": device,
+                    "dtype": torch.bfloat16,
+                    "enable_prefix_caching": True,
+                    "gpu_memory_utilization": util,
+                }
+                if max_model_len is not None and max_model_len > 0:
+                    kwargs["max_model_len"] = int(max_model_len)
+                if max_num_seqs is not None and max_num_seqs > 0:
+                    kwargs["max_num_seqs"] = int(max_num_seqs)
+                return LLM(**kwargs)
+            except torch.OutOfMemoryError:
+                print(f"[warn] vLLM init OOM at gpu_memory_utilization={util:.2f}; retrying...")
+
+    raise RuntimeError(
+        "vLLM initialization failed after OOM retries; "
+        f"tried gpu_memory_utilization values: {tried_utils}"
+    )
 
 
 def load_policy_into_vllm_instance(policy: PreTrainedModel, llm) -> None:
@@ -186,6 +220,8 @@ def vllm_eval_context(
     vllm_device: str,
     seed: int,
     gpu_memory_utilization: float,
+    max_model_len: int,
+    max_num_seqs: int,
 ):
     """Context manager for vLLM-based evaluation.
 
@@ -198,7 +234,14 @@ def vllm_eval_context(
         policy.to("cpu")
         torch.cuda.empty_cache()
 
-    llm = init_vllm(model_id, vllm_device, seed, gpu_memory_utilization)
+    llm = init_vllm(
+        model_id,
+        vllm_device,
+        seed,
+        gpu_memory_utilization,
+        max_model_len=max_model_len,
+        max_num_seqs=max_num_seqs,
+    )
     load_policy_into_vllm_instance(policy, llm)
     try:
         yield llm
@@ -470,6 +513,8 @@ def main() -> None:
                         vllm_device=args.vllm_device,
                         seed=args.seed,
                         gpu_memory_utilization=args.vllm_gpu_memory_utilization,
+                        max_model_len=args.max_seq_len + args.eval_max_tokens,
+                        max_num_seqs=args.eval_generate_batch_size,
                     ) as llm:
                         val_metrics = evaluate_with_vllm(
                             llm=llm,
@@ -558,6 +603,8 @@ def main() -> None:
         vllm_device=args.vllm_device,
         seed=args.seed,
         gpu_memory_utilization=args.vllm_gpu_memory_utilization,
+        max_model_len=args.max_seq_len + args.eval_max_tokens,
+        max_num_seqs=args.eval_generate_batch_size,
     ) as llm:
         intellect_test_metrics = evaluate_with_vllm(
             llm=llm,

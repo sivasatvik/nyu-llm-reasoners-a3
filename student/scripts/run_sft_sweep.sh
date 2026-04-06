@@ -29,6 +29,8 @@ VLLM_DEVICE=${VLLM_DEVICE:-cuda:1}
 WANDB_PROJECT=${WANDB_PROJECT:-"nyu-llm-reasoners-a3-benchmarks"}
 WANDB_ENTITY=${WANDB_ENTITY:-"sm12779-new-york-university"}
 
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 for size in ${SIZES}; do
   for lr in ${LRS}; do
     for gbs in ${GLOBAL_BS}; do
