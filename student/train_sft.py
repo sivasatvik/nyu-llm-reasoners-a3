@@ -542,13 +542,13 @@ def main() -> None:
             str(checkpoint_path),
             trust_remote_code=True,
             torch_dtype=torch.bfloat16,
-        ).to(args.policy_device)
+        ).cpu()
         eval_model.eval()
 
         with vllm_eval_context(
             model_id=args.model_id,
-            policy=eval_model,
-            policy_device=args.policy_device,
+            policy=eval_model,          # CPU model
+            policy_device="cpu",        # IMPORTANT
             vllm_device=args.vllm_device,
             seed=args.seed,
             gpu_memory_utilization=args.vllm_gpu_memory_utilization,
