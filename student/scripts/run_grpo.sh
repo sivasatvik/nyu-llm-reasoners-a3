@@ -16,7 +16,7 @@ cd "${REPO_ROOT}"
 
 # ---- configurable defaults ------------------------------------------------
 TRAIN_PATH="${TRAIN_PATH:-data/countdown/dataset/train}"
-VAL_PATH="${VAL_PATH:-data/countdown/dataset/test}"
+VAL_PATH="${VAL_PATH:-data/countdown/dataset/dev}"
 PROMPT_PATH="${PROMPT_PATH:-student/prompts/countdown.prompt}"
 MODEL_ID="${MODEL_ID:-Qwen/Qwen2.5-Math-1.5B}"
 LOSS_TYPE="${LOSS_TYPE:-reinforce_with_baseline}"
