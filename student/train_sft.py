@@ -441,6 +441,7 @@ def main() -> None:
     eval_step = 0
     best_val_acc = -1.0
     best_ckpt = None
+    eval_checkpoints: list[tuple[int, int, Path]] = []  # (eval_step, train_step, path)
 
     pbar = tqdm(total=args.max_train_steps if args.max_train_steps > 0 else None, desc="Training")
     for epoch in range(args.epochs):
@@ -507,76 +508,12 @@ def main() -> None:
 
                 need_eval = (train_step % args.eval_every_steps == 0)
                 if need_eval:
-                    model.eval()
-                    with vllm_eval_context(
-                        model_id=args.model_id,
-                        policy=model,
-                        policy_device=args.policy_device,
-                        vllm_device=args.vllm_device,
-                        seed=args.seed,
-                        gpu_memory_utilization=args.vllm_gpu_memory_utilization,
-                        max_model_len=args.max_seq_len + args.eval_max_tokens,
-                        max_num_seqs=1,
-                    ) as llm:
-                        val_metrics = evaluate_with_vllm(
-                            llm=llm,
-                            prompts=math_val_prompts,
-                            ground_truths=math_val_gts,
-                            max_examples=args.max_eval_examples,
-                            max_tokens=args.eval_max_tokens,
-                            generation_batch_size=args.eval_generate_batch_size,
-                        )
                     eval_step += 1
-
-                    if use_wandb:
-                        wandb.log(
-                            {
-                                "eval_step": eval_step,
-                                "eval/math_val_accuracy": val_metrics["accuracy"],
-                                "eval/math_val_count_correct_both1": val_metrics["count_correct_both1"],
-                                "eval/math_val_count_format1_answer0": val_metrics["count_format1_answer0"],
-                                "eval/math_val_count_format0_answer0": val_metrics["count_format0_answer0"],
-                            }
-                        )
-
-                    with csv_path.open("a", encoding="utf-8", newline="") as f:
-                        writer = csv.DictWriter(f, fieldnames=[
-                            "train_step",
-                            "eval_step",
-                            "train_loss",
-                            "eval_math_val_accuracy",
-                            "eval_intellect_test_accuracy",
-                            "eval_math_test_accuracy",
-                            "dataset_size",
-                            "lr",
-                            "global_batch_size",
-                            "micro_batch_size",
-                        ])
-                        writer.writerow({
-                            "train_step": train_step,
-                            "eval_step": eval_step,
-                            "train_loss": "",
-                            "eval_math_val_accuracy": val_metrics["accuracy"],
-                            "eval_intellect_test_accuracy": "",
-                            "eval_math_test_accuracy": "",
-                            "dataset_size": keep_n,
-                            "lr": args.lr,
-                            "global_batch_size": args.global_batch_size,
-                            "micro_batch_size": args.micro_batch_size,
-                        })
-
-                    if val_metrics["accuracy"] > best_val_acc:
-                        best_val_acc = val_metrics["accuracy"]
-                        best_ckpt = ckpt_dir / "best"
-                        model.save_pretrained(best_ckpt)
-                        tokenizer.save_pretrained(best_ckpt)
-
-                    if args.save_every_eval:
-                        eval_ckpt = ckpt_dir / f"eval_step_{eval_step}"
-                        model.save_pretrained(eval_ckpt)
-                        tokenizer.save_pretrained(eval_ckpt)
-
-                    model.train()
+                    eval_ckpt = ckpt_dir / f"eval_step_{eval_step:05d}_train_step_{train_step:07d}"
+                    model.save_pretrained(eval_ckpt)
+                    tokenizer.save_pretrained(eval_ckpt)
+                    eval_checkpoints.append((eval_step, train_step, eval_ckpt))
+                    print(f"[checkpoint] saved {eval_ckpt.name} for post-training eval")
 
                 if args.max_train_steps > 0 and train_step >= args.max_train_steps:
                     break
@@ -586,10 +523,94 @@ def main() -> None:
 
     pbar.close()
 
+    # If no eval checkpoint was saved during training, save the final model as one eval point.
+    if not eval_checkpoints:
+        eval_step = 1
+        final_eval_ckpt = ckpt_dir / f"eval_step_{eval_step:05d}_train_step_{train_step:07d}"
+        model.save_pretrained(final_eval_ckpt)
+        tokenizer.save_pretrained(final_eval_ckpt)
+        eval_checkpoints.append((eval_step, train_step, final_eval_ckpt))
+
+    # Post-training evaluation over saved checkpoints to build validation curves.
+    print(f"\n[posthoc-eval] evaluating {len(eval_checkpoints)} checkpoints...")
+    model.to("cpu")
+    del model
+    torch.cuda.empty_cache()
+
+    for checkpoint_eval_step, checkpoint_train_step, checkpoint_path in eval_checkpoints:
+        eval_model = AutoModelForCausalLM.from_pretrained(
+            str(checkpoint_path),
+            trust_remote_code=True,
+            torch_dtype=torch.bfloat16,
+        ).to(args.policy_device)
+        eval_model.eval()
+
+        with vllm_eval_context(
+            model_id=args.model_id,
+            policy=eval_model,
+            policy_device=args.policy_device,
+            vllm_device=args.vllm_device,
+            seed=args.seed,
+            gpu_memory_utilization=args.vllm_gpu_memory_utilization,
+            max_model_len=args.max_seq_len + args.eval_max_tokens,
+            max_num_seqs=1,
+        ) as llm:
+            val_metrics = evaluate_with_vllm(
+                llm=llm,
+                prompts=math_val_prompts,
+                ground_truths=math_val_gts,
+                max_examples=args.max_eval_examples,
+                max_tokens=args.eval_max_tokens,
+                generation_batch_size=args.eval_generate_batch_size,
+            )
+
+        if use_wandb:
+            wandb.log(
+                {
+                    "eval_step": checkpoint_eval_step,
+                    "eval/math_val_accuracy": val_metrics["accuracy"],
+                    "eval/math_val_count_correct_both1": val_metrics["count_correct_both1"],
+                    "eval/math_val_count_format1_answer0": val_metrics["count_format1_answer0"],
+                    "eval/math_val_count_format0_answer0": val_metrics["count_format0_answer0"],
+                }
+            )
+
+        with csv_path.open("a", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=[
+                "train_step",
+                "eval_step",
+                "train_loss",
+                "eval_math_val_accuracy",
+                "eval_intellect_test_accuracy",
+                "eval_math_test_accuracy",
+                "dataset_size",
+                "lr",
+                "global_batch_size",
+                "micro_batch_size",
+            ])
+            writer.writerow({
+                "train_step": checkpoint_train_step,
+                "eval_step": checkpoint_eval_step,
+                "train_loss": "",
+                "eval_math_val_accuracy": val_metrics["accuracy"],
+                "eval_intellect_test_accuracy": "",
+                "eval_math_test_accuracy": "",
+                "dataset_size": keep_n,
+                "lr": args.lr,
+                "global_batch_size": args.global_batch_size,
+                "micro_batch_size": args.micro_batch_size,
+            })
+
+        if val_metrics["accuracy"] > best_val_acc:
+            best_val_acc = val_metrics["accuracy"]
+            best_ckpt = checkpoint_path
+
+        del eval_model
+        torch.cuda.empty_cache()
+
     if best_ckpt is None:
-        best_ckpt = ckpt_dir / "last"
-        model.save_pretrained(best_ckpt)
-        tokenizer.save_pretrained(best_ckpt)
+        # Fallback should not trigger because we always evaluate at least one checkpoint.
+        best_ckpt = eval_checkpoints[-1][2]
 
     best_model = AutoModelForCausalLM.from_pretrained(
         str(best_ckpt),
@@ -635,6 +656,7 @@ def main() -> None:
         "train_steps": train_step,
         "best_val_accuracy": best_val_acc,
         "best_checkpoint": str(best_ckpt),
+        "posthoc_eval_points": len(eval_checkpoints),
         "intellect_test": intellect_test_metrics,
         "math_test": math_test_metrics,
         "metrics_csv": str(csv_path),
