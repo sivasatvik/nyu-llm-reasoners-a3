@@ -293,7 +293,7 @@ def main() -> None:
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--micro-batch-size", type=int, default=2)
     parser.add_argument("--global-batch-size", type=int, default=8)
-    parser.add_argument("--eval-every-steps", type=int, default=50)
+    parser.add_argument("--eval-every-steps", type=int, default=5)
     parser.add_argument("--max-train-steps", type=int, default=0)
     parser.add_argument("--max-eval-examples", type=int, default=256)
     parser.add_argument("--eval-max-tokens", type=int, default=1024)
