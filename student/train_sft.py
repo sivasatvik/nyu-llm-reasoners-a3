@@ -189,7 +189,9 @@ def init_vllm(
                     "model": model_id,
                     "device": device,
                     "dtype": torch.bfloat16,
-                    "enable_prefix_caching": True,
+                    # Prefix caching increases KV-cache pressure and is not
+                    # needed for these eval workloads.
+                    "enable_prefix_caching": False,
                     "gpu_memory_utilization": util,
                 }
                 if max_model_len is not None and max_model_len > 0:
@@ -514,7 +516,7 @@ def main() -> None:
                         seed=args.seed,
                         gpu_memory_utilization=args.vllm_gpu_memory_utilization,
                         max_model_len=args.max_seq_len + args.eval_max_tokens,
-                        max_num_seqs=args.eval_generate_batch_size,
+                        max_num_seqs=1,
                     ) as llm:
                         val_metrics = evaluate_with_vllm(
                             llm=llm,
@@ -604,7 +606,7 @@ def main() -> None:
         seed=args.seed,
         gpu_memory_utilization=args.vllm_gpu_memory_utilization,
         max_model_len=args.max_seq_len + args.eval_max_tokens,
-        max_num_seqs=args.eval_generate_batch_size,
+        max_num_seqs=1,
     ) as llm:
         intellect_test_metrics = evaluate_with_vllm(
             llm=llm,
