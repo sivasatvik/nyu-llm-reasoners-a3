@@ -51,7 +51,7 @@ def plot_run(run_dir: Path, ax_acc, ax_reward, label: str) -> None:
 
     # Validation accuracy vs eval_step (rows where eval_accuracy is set)
     eval_pairs = [
-        (row["train_step"], row["eval_accuracy"])
+        (row["eval_step"], row["eval_accuracy"])
         for row in (
             dict(zip(data.keys(), vals))
             for vals in zip(*data.values())

@@ -331,8 +331,33 @@ def main() -> None:
                         choices=["no_baseline", "reinforce_with_baseline", "grpo_clip"])
     parser.add_argument("--group-size",   type=int,   default=8)
     parser.add_argument("--cliprange",    type=float, default=0.2)
-    parser.add_argument("--normalize-by-std", action="store_true", default=True)
+    parser.add_argument(
+        "--normalize-by-std",
+        dest="normalize_by_std",
+        action="store_true",
+        help="Normalize within-group advantages by standard deviation.",
+    )
+    parser.add_argument(
+        "--no-normalize-by-std",
+        dest="normalize_by_std",
+        action="store_false",
+        help="Use mean-centered advantages only (no std normalization).",
+    )
+    parser.set_defaults(normalize_by_std=True)
     parser.add_argument("--advantage-eps",    type=float, default=1e-6)
+    parser.add_argument(
+        "--sequence-loss-normalization",
+        default="masked_mean",
+        choices=["masked_mean", "masked_normalize"],
+        help="How to aggregate per-token GRPO losses over response tokens.",
+    )
+    parser.add_argument(
+        "--normalize-constant",
+        type=float,
+        default=0.0,
+        help="Constant divisor used only when --sequence-loss-normalization=masked_normalize. "
+             "If <= 0, defaults to max_gen_tokens.",
+    )
     # Batching
     parser.add_argument("--n-prompts-per-step",  type=int, default=2,
                         help="Number of distinct prompts to sample per training step.")
@@ -379,6 +404,7 @@ def main() -> None:
     rollout_batch_size = args.n_prompts_per_step * args.group_size
     global_batch_size  = args.global_batch_size or rollout_batch_size
     grad_acc_steps     = max(1, global_batch_size // args.micro_batch_size)
+    seq_norm_constant = args.normalize_constant if args.normalize_constant > 0 else float(args.max_gen_tokens)
 
     # ---- run directory ----------------------------------------------------
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -406,8 +432,8 @@ def main() -> None:
     csv_path = run_dir / "metrics.csv"
     csv_fieldnames = [
         "train_step", "eval_step",
-        "train_loss", "train_mean_reward", "train_mean_advantage",
-        "eval_accuracy", "eval_correct", "eval_format_only", "eval_neither",
+        "train_loss", "train_mean_reward", "train_mean_advantage", "train_grad_norm",
+        "eval_accuracy", "eval_answer_reward", "eval_correct", "eval_format_only", "eval_neither",
     ]
     with csv_path.open("w", newline="", encoding="utf-8") as f:
         csv.DictWriter(f, fieldnames=csv_fieldnames).writeheader()
@@ -600,11 +626,13 @@ def main() -> None:
                     advantages=mb_adv if args.loss_type != "no_baseline" else None,
                     old_log_probs=old_lp,
                     cliprange=args.cliprange,
+                    sequence_loss_normalization=args.sequence_loss_normalization,
+                    normalize_constant=seq_norm_constant,
                 )
                 accum_loss  += float(loss.item())
                 micro_count += 1
 
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            grad_norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip).item())
             optimizer.step()
             train_step += 1
             pbar.update(1)
@@ -620,6 +648,7 @@ def main() -> None:
                     "train/loss":         mean_loss,
                     "train/mean_reward":  mean_reward,
                     "train/mean_advantage": mean_adv,
+                    "train/grad_norm":     grad_norm,
                     "train/max_reward":   float(reward_meta["max_reward"]),
                     "train/min_reward":   float(reward_meta["min_reward"]),
                 })
@@ -629,6 +658,7 @@ def main() -> None:
                 "train_loss":        mean_loss,
                 "train_mean_reward": mean_reward,
                 "train_mean_advantage": mean_adv,
+                "train_grad_norm":   grad_norm,
             })
 
             # 6. Periodic eval & rollout logging
@@ -715,8 +745,10 @@ def main() -> None:
                     })
 
                 write_csv_row({
+                    "train_step":   train_step,
                     "eval_step":    eval_step,
                     "eval_accuracy": acc,
+                    "eval_answer_reward": acc,
                     "eval_correct":  correct,
                     "eval_format_only": fmt_only,
                     "eval_neither":  neither,

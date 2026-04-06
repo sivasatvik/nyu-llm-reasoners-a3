@@ -6,7 +6,7 @@ from typing import Callable, Literal
 
 import torch
 
-from student.sft import masked_mean
+from student.sft import masked_mean, masked_normalize
 
 
 def compute_group_normalized_rewards(
@@ -193,6 +193,8 @@ def grpo_microbatch_train_step(
     advantages: torch.Tensor | None = None,
     old_log_probs: torch.Tensor | None = None,
     cliprange: float | None = None,
+    sequence_loss_normalization: Literal["masked_mean", "masked_normalize"] = "masked_mean",
+    normalize_constant: float = 1.0,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Execute a forward-and-backward pass on a GRPO microbatch.
 
@@ -205,6 +207,10 @@ def grpo_microbatch_train_step(
         advantages: shape (batch_size, 1); required for the other two modes.
         old_log_probs: shape (batch_size, sequence_length); required for "grpo_clip".
         cliprange: clip parameter ε; required for "grpo_clip".
+        sequence_loss_normalization: How to aggregate per-token losses over
+            response tokens in each sequence.
+        normalize_constant: Constant scalar used when
+            sequence_loss_normalization="masked_normalize".
 
     Returns:
         loss: scalar tensor (microbatch loss adjusted for gradient accumulation).
@@ -219,8 +225,22 @@ def grpo_microbatch_train_step(
         cliprange=cliprange,
     )
 
-    # Average over response tokens using the mask, then scale for grad accumulation.
-    microbatch_loss = masked_mean(per_token_loss, response_mask)
+    # Aggregate over response tokens according to the chosen normalization.
+    if sequence_loss_normalization == "masked_mean":
+        microbatch_loss = masked_mean(per_token_loss, response_mask)
+    elif sequence_loss_normalization == "masked_normalize":
+        per_example_loss = masked_normalize(
+            tensor=per_token_loss,
+            mask=response_mask,
+            normalize_constant=normalize_constant,
+            dim=-1,
+        )
+        microbatch_loss = per_example_loss.mean()
+    else:
+        raise ValueError(
+            f"Unknown sequence_loss_normalization: {sequence_loss_normalization!r}"
+        )
+
     loss = microbatch_loss / gradient_accumulation_steps
     loss.backward()
 
