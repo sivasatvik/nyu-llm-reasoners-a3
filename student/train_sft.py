@@ -215,6 +215,7 @@ def evaluate_with_vllm(
     ground_truths: list[str],
     max_examples: int,
     max_tokens: int,
+    generation_batch_size: int,
 ) -> dict[str, float]:
     from vllm import SamplingParams
 
@@ -232,30 +233,36 @@ def evaluate_with_vllm(
     ground_truths = ground_truths[:n]
 
     params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
-    outputs = llm.generate(prompts, params)
 
     correct = 0
     cat_110 = 0
     cat_100 = 0
     cat_000 = 0
-    for i, out in enumerate(outputs):
-        text = out.outputs[0].text
-        reward = question_only_reward_fn(text, ground_truths[i])
-        fr, ar = reward["format_reward"], reward["answer_reward"]
-        correct += int(reward["reward"])
-        if fr == 1.0 and ar == 1.0:
-            cat_110 += 1
-        elif fr == 1.0 and ar == 0.0:
-            cat_100 += 1
-        else:
-            cat_000 += 1
+    total = 0
+    step = max(1, generation_batch_size)
+    for start in range(0, len(prompts), step):
+        chunk_prompts = prompts[start : start + step]
+        chunk_gts = ground_truths[start : start + step]
+        outputs = llm.generate(chunk_prompts, params)
+        total += len(outputs)
+        for i, out in enumerate(outputs):
+            text = out.outputs[0].text
+            reward = question_only_reward_fn(text, chunk_gts[i])
+            fr, ar = reward["format_reward"], reward["answer_reward"]
+            correct += int(reward["reward"])
+            if fr == 1.0 and ar == 1.0:
+                cat_110 += 1
+            elif fr == 1.0 and ar == 0.0:
+                cat_100 += 1
+            else:
+                cat_000 += 1
 
     return {
-        "accuracy": correct / len(outputs),
+        "accuracy": correct / max(total, 1),
         "count_correct_both1": float(cat_110),
         "count_format1_answer0": float(cat_100),
         "count_format0_answer0": float(cat_000),
-        "n_examples": float(len(outputs)),
+        "n_examples": float(total),
     }
 
 
@@ -297,6 +304,7 @@ def main() -> None:
     parser.add_argument("--max-train-steps", type=int, default=0)
     parser.add_argument("--max-eval-examples", type=int, default=256)
     parser.add_argument("--eval-max-tokens", type=int, default=1024)
+    parser.add_argument("--eval-generate-batch-size", type=int, default=8)
     parser.add_argument("--max-seq-len", type=int, default=256,
                         help="Truncate tokenized sequences to this length before the forward pass.")
     parser.add_argument("--policy-device", default="cuda:0")
@@ -469,6 +477,7 @@ def main() -> None:
                             ground_truths=math_val_gts,
                             max_examples=args.max_eval_examples,
                             max_tokens=args.eval_max_tokens,
+                            generation_batch_size=args.eval_generate_batch_size,
                         )
                     eval_step += 1
 
@@ -556,6 +565,7 @@ def main() -> None:
             ground_truths=intellect_test_gts,
             max_examples=args.max_eval_examples,
             max_tokens=args.eval_max_tokens,
+            generation_batch_size=args.eval_generate_batch_size,
         )
         math_test_metrics = evaluate_with_vllm(
             llm=llm,
@@ -563,6 +573,7 @@ def main() -> None:
             ground_truths=math_test_gts,
             max_examples=args.max_eval_examples,
             max_tokens=args.eval_max_tokens,
+            generation_batch_size=args.eval_generate_batch_size,
         )
 
     summary = {

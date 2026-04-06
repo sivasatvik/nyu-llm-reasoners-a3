@@ -18,7 +18,9 @@ GLOBAL_BS=${GLOBAL_BS:-"8 16"}
 MICRO_BS=${MICRO_BS:-2}
 EPOCHS=${EPOCHS:-1}
 EVAL_EVERY=${EVAL_EVERY:-2}
-MAX_EVAL_EXAMPLES=${MAX_EVAL_EXAMPLES:-256}
+MAX_EVAL_EXAMPLES=${MAX_EVAL_EXAMPLES:-64}
+EVAL_MAX_TOKENS=${EVAL_MAX_TOKENS:-512}
+EVAL_GEN_BS=${EVAL_GEN_BS:-8}
 MAX_TRAIN_STEPS=${MAX_TRAIN_STEPS:-0}
 
 POLICY_DEVICE=${POLICY_DEVICE:-cuda:0}
@@ -45,6 +47,8 @@ for size in ${SIZES}; do
         --micro-batch-size "${MICRO_BS}" \
         --eval-every-steps "${EVAL_EVERY}" \
         --max-eval-examples "${MAX_EVAL_EXAMPLES}" \
+        --eval-max-tokens "${EVAL_MAX_TOKENS}" \
+        --eval-generate-batch-size "${EVAL_GEN_BS}" \
         --max-train-steps "${MAX_TRAIN_STEPS}" \
         --policy-device "${POLICY_DEVICE}" \
         --vllm-device "${VLLM_DEVICE}" \
