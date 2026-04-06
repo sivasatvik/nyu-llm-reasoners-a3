@@ -22,7 +22,7 @@ MODEL_ID="${MODEL_ID:-Qwen/Qwen2.5-Math-1.5B}"
 LOSS_TYPE="${LOSS_TYPE:-reinforce_with_baseline}"
 TRAIN_STEPS="${TRAIN_STEPS:-200}"
 N_PROMPTS="${N_PROMPTS:-2}"
-GROUP_SIZES="${GROUP_SIZES:-8}"
+GROUP_SIZE="${GROUP_SIZE:-8}"
 NORM_FLAG="${NORM_FLAG:-"--normalize-by-std"}"   # default to std normalization
 SEQ_NORM="${SEQ_NORM:-masked_mean}"  # default to masked_mean normalization
 NORMALIZE_CONSTANT="${NORMALIZE_CONSTANT:-0}"
@@ -57,7 +57,7 @@ for LR in ${LRS}; do
     --loss-type         "${LOSS_TYPE}" \
     --train-steps       "${TRAIN_STEPS}" \
     --n-prompts-per-step "${N_PROMPTS}" \
-    --group-size        "${GS}" \
+    --group-size        "${GROUP_SIZE}" \
     --micro-batch-size  "${MICRO_BS}" \
     --lr                "${LR}" \
     --eval-every        "${EVAL_EVERY}" \
