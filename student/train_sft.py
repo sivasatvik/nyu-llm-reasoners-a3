@@ -248,33 +248,28 @@ def vllm_eval_context(
     try:
         yield llm
     finally:
-        # 1. Delete the vLLM instance
-        if 'llm' in locals() and llm is not None:
-            del llm
+        # 1. Forcefully detach the massive engine from the wrapper
+        if hasattr(llm, "llm_engine"):
+            del llm.llm_engine
 
-        # 2. Let vLLM cleanly destroy its own distributed states
+        # 2. Cleanly destroy vLLM distributed states
         try:
-            from vllm.distributed.parallel_state import destroy_model_parallel
+            from vllm.distributed.parallel_state import destroy_model_parallel, destroy_distributed_environment
             destroy_model_parallel()
-        except ImportError:
-            pass
-
-        try:
-            from vllm.distributed.parallel_state import destroy_distributed_environment
             destroy_distributed_environment()
         except ImportError:
             pass
 
-        # NOTE: We no longer call dist.destroy_process_group() manually here!
-        # destroy_distributed_environment() handles it safely for vLLM.
-
-        # 3. Synchronize and clear PyTorch memory
+        # 3. Synchronize and wipe GPU memory
         import gc
         import torch
         gc.collect()
         if torch.cuda.is_available():
-            torch.cuda.synchronize()  # Prevents the ProcessGroupNCCL warning
+            torch.cuda.synchronize()
             torch.cuda.empty_cache()
+
+        if single_gpu:
+            policy.to(policy_device)
 
 
 def evaluate_with_vllm(
@@ -587,6 +582,10 @@ def main() -> None:
                 generation_batch_size=args.eval_generate_batch_size,
             )
 
+        del llm
+        import gc; gc.collect()
+        torch.cuda.empty_cache()
+
         if use_wandb:
             wandb.log(
                 {
@@ -668,6 +667,10 @@ def main() -> None:
             max_tokens=args.eval_max_tokens,
             generation_batch_size=args.eval_generate_batch_size,
         )
+
+    del llm
+    import gc; gc.collect()
+    torch.cuda.empty_cache()
 
     summary = {
         "run_name": run_name,
