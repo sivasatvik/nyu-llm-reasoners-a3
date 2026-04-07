@@ -248,33 +248,33 @@ def vllm_eval_context(
     try:
         yield llm
     finally:
-        # --- CRITICAL vLLM MEMORY LEAK FIX ---
-        import gc
-        import torch.distributed as dist
+        # 1. Delete the vLLM instance
+        if 'llm' in locals() and llm is not None:
+            del llm
 
-        # 1. Break circular references in vLLM to allow garbage collection
-        if hasattr(llm, "llm_engine"):
-            del llm.llm_engine
-        del llm
-        gc.collect()
-        torch.cuda.empty_cache()
-
-        # 2. Destroy vLLM's parallel states
+        # 2. Let vLLM cleanly destroy its own distributed states
         try:
             from vllm.distributed.parallel_state import destroy_model_parallel
             destroy_model_parallel()
         except ImportError:
             pass
 
-        # 3. Destroy the NCCL process group so GPU memory is fully released
-        if dist.is_initialized():
-            dist.destroy_process_group()
+        try:
+            from vllm.distributed.parallel_state import destroy_distributed_environment
+            destroy_distributed_environment()
+        except ImportError:
+            pass
 
-        torch.cuda.empty_cache()
-        # -------------------------------------
+        # NOTE: We no longer call dist.destroy_process_group() manually here!
+        # destroy_distributed_environment() handles it safely for vLLM.
 
-        if single_gpu:
-            policy.to(policy_device)
+        # 3. Synchronize and clear PyTorch memory
+        import gc
+        import torch
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()  # Prevents the ProcessGroupNCCL warning
+            torch.cuda.empty_cache()
 
 
 def evaluate_with_vllm(
