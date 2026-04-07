@@ -542,28 +542,47 @@ def main() -> None:
     ).to(args.policy_device)
     best_model.eval()
 
-    with vllm_eval_context(
-        model_id=args.model_id,
-        policy=best_model,
-        policy_device=args.policy_device,
-        vllm_device=args.vllm_device,
-        seed=args.seed,
-        gpu_memory_utilization=args.vllm_gpu_memory_utilization,
-    ) as llm:
-        intellect_test_metrics = evaluate_with_vllm(
-            llm=llm,
-            prompts=intellect_test_prompts,
-            ground_truths=intellect_test_gts,
-            max_examples=args.max_eval_examples,
-            max_tokens=args.eval_max_tokens,
-        )
-        math_test_metrics = evaluate_with_vllm(
-            llm=llm,
-            prompts=math_test_prompts,
-            ground_truths=math_test_gts,
-            max_examples=args.max_eval_examples,
-            max_tokens=args.eval_max_tokens,
-        )
+    final_eval_error = ""
+    try:
+        with vllm_eval_context(
+            model_id=args.model_id,
+            policy=best_model,
+            policy_device=args.policy_device,
+            vllm_device=args.vllm_device,
+            seed=args.seed,
+            gpu_memory_utilization=args.vllm_gpu_memory_utilization,
+        ) as llm:
+            intellect_test_metrics = evaluate_with_vllm(
+                llm=llm,
+                prompts=intellect_test_prompts,
+                ground_truths=intellect_test_gts,
+                max_examples=args.max_eval_examples,
+                max_tokens=args.eval_max_tokens,
+            )
+            math_test_metrics = evaluate_with_vllm(
+                llm=llm,
+                prompts=math_test_prompts,
+                ground_truths=math_test_gts,
+                max_examples=args.max_eval_examples,
+                max_tokens=args.eval_max_tokens,
+            )
+    except Exception as e:
+        final_eval_error = str(e)
+        print(f"[warn] final evaluation failed; continuing. Error: {final_eval_error}")
+        intellect_test_metrics = {
+            "accuracy": 0.0,
+            "count_correct_both1": 0.0,
+            "count_format1_answer0": 0.0,
+            "count_format0_answer0": 0.0,
+            "n_examples": 0.0,
+        }
+        math_test_metrics = {
+            "accuracy": 0.0,
+            "count_correct_both1": 0.0,
+            "count_format1_answer0": 0.0,
+            "count_format0_answer0": 0.0,
+            "n_examples": 0.0,
+        }
 
     summary = {
         "run_name": run_name,
@@ -577,6 +596,7 @@ def main() -> None:
         "best_checkpoint": str(best_ckpt),
         "intellect_test": intellect_test_metrics,
         "math_test": math_test_metrics,
+        "final_eval_error": final_eval_error,
         "metrics_csv": str(csv_path),
     }
     save_json(run_dir / "summary.json", summary)
