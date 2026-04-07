@@ -248,8 +248,31 @@ def vllm_eval_context(
     try:
         yield llm
     finally:
+        # --- CRITICAL vLLM MEMORY LEAK FIX ---
+        import gc
+        import torch.distributed as dist
+
+        # 1. Break circular references in vLLM to allow garbage collection
+        if hasattr(llm, "llm_engine"):
+            del llm.llm_engine
         del llm
+        gc.collect()
         torch.cuda.empty_cache()
+
+        # 2. Destroy vLLM's parallel states
+        try:
+            from vllm.distributed.parallel_state import destroy_model_parallel
+            destroy_model_parallel()
+        except ImportError:
+            pass
+
+        # 3. Destroy the NCCL process group so GPU memory is fully released
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+        torch.cuda.empty_cache()
+        # -------------------------------------
+
         if single_gpu:
             policy.to(policy_device)
 
