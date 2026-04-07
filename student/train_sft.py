@@ -152,14 +152,7 @@ def load_math_split(path: str | None, prompt_template: str, split: str) -> tuple
     return prompts, gts
 
 
-def init_vllm(
-    model_id: str,
-    device: str,
-    seed: int,
-    gpu_memory_utilization: float = 0.85,
-    max_model_len: int | None = None,
-    max_num_seqs: int | None = None,
-):
+def init_vllm(model_id: str, device: str, seed: int, gpu_memory_utilization: float = 0.85):
     from vllm import LLM
     from vllm.model_executor import set_random_seed as vllm_set_random_seed
 
@@ -169,43 +162,14 @@ def init_vllm(
         "vllm.worker.worker.Worker._assert_memory_footprint_increased_during_profiling",
         return_value=None,
     )
-    utils_try = [gpu_memory_utilization, 0.75, 0.65, 0.55]
-    seen: set[float] = set()
-    tried_utils: list[float] = []
-
-    for util in utils_try:
-        util = float(util)
-        if util in seen:
-            continue
-        seen.add(util)
-        tried_utils.append(util)
-
-        if str(device).startswith("cuda"):
-            torch.cuda.empty_cache()
-
-        with world_size_patch, profiling_patch:
-            try:
-                kwargs: dict[str, Any] = {
-                    "model": model_id,
-                    "device": device,
-                    "dtype": torch.bfloat16,
-                    # Prefix caching increases KV-cache pressure and is not
-                    # needed for these eval workloads.
-                    "enable_prefix_caching": False,
-                    "gpu_memory_utilization": util,
-                }
-                if max_model_len is not None and max_model_len > 0:
-                    kwargs["max_model_len"] = int(max_model_len)
-                if max_num_seqs is not None and max_num_seqs > 0:
-                    kwargs["max_num_seqs"] = int(max_num_seqs)
-                return LLM(**kwargs)
-            except torch.OutOfMemoryError:
-                print(f"[warn] vLLM init OOM at gpu_memory_utilization={util:.2f}; retrying...")
-
-    raise RuntimeError(
-        "vLLM initialization failed after OOM retries; "
-        f"tried gpu_memory_utilization values: {tried_utils}"
-    )
+    with world_size_patch, profiling_patch:
+        return LLM(
+            model=model_id,
+            device=device,
+            dtype=torch.bfloat16,
+            enable_prefix_caching=True,
+            gpu_memory_utilization=gpu_memory_utilization,
+        )
 
 
 def load_policy_into_vllm_instance(policy: PreTrainedModel, llm) -> None:
@@ -222,8 +186,6 @@ def vllm_eval_context(
     vllm_device: str,
     seed: int,
     gpu_memory_utilization: float,
-    max_model_len: int,
-    max_num_seqs: int,
 ):
     """Context manager for vLLM-based evaluation.
 
@@ -236,38 +198,13 @@ def vllm_eval_context(
         policy.to("cpu")
         torch.cuda.empty_cache()
 
-    llm = init_vllm(
-        model_id,
-        vllm_device,
-        seed,
-        gpu_memory_utilization,
-        max_model_len=max_model_len,
-        max_num_seqs=max_num_seqs,
-    )
+    llm = init_vllm(model_id, vllm_device, seed, gpu_memory_utilization)
     load_policy_into_vllm_instance(policy, llm)
     try:
         yield llm
     finally:
-        # 1. Forcefully detach the massive engine from the wrapper
-        if hasattr(llm, "llm_engine"):
-            del llm.llm_engine
-
-        # 2. Cleanly destroy vLLM distributed states
-        try:
-            from vllm.distributed.parallel_state import destroy_model_parallel, destroy_distributed_environment
-            destroy_model_parallel()
-            destroy_distributed_environment()
-        except ImportError:
-            pass
-
-        # 3. Synchronize and wipe GPU memory
-        import gc
-        import torch
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
-
+        del llm
+        torch.cuda.empty_cache()
         if single_gpu:
             policy.to(policy_device)
 
@@ -278,7 +215,6 @@ def evaluate_with_vllm(
     ground_truths: list[str],
     max_examples: int,
     max_tokens: int,
-    generation_batch_size: int,
 ) -> dict[str, float]:
     from vllm import SamplingParams
 
@@ -296,36 +232,30 @@ def evaluate_with_vllm(
     ground_truths = ground_truths[:n]
 
     params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
+    outputs = llm.generate(prompts, params)
 
     correct = 0
     cat_110 = 0
     cat_100 = 0
     cat_000 = 0
-    total = 0
-    step = max(1, generation_batch_size)
-    for start in range(0, len(prompts), step):
-        chunk_prompts = prompts[start : start + step]
-        chunk_gts = ground_truths[start : start + step]
-        outputs = llm.generate(chunk_prompts, params)
-        total += len(outputs)
-        for i, out in enumerate(outputs):
-            text = out.outputs[0].text
-            reward = question_only_reward_fn(text, chunk_gts[i])
-            fr, ar = reward["format_reward"], reward["answer_reward"]
-            correct += int(reward["reward"])
-            if fr == 1.0 and ar == 1.0:
-                cat_110 += 1
-            elif fr == 1.0 and ar == 0.0:
-                cat_100 += 1
-            else:
-                cat_000 += 1
+    for i, out in enumerate(outputs):
+        text = out.outputs[0].text
+        reward = question_only_reward_fn(text, ground_truths[i])
+        fr, ar = reward["format_reward"], reward["answer_reward"]
+        correct += int(reward["reward"])
+        if fr == 1.0 and ar == 1.0:
+            cat_110 += 1
+        elif fr == 1.0 and ar == 0.0:
+            cat_100 += 1
+        else:
+            cat_000 += 1
 
     return {
-        "accuracy": correct / max(total, 1),
+        "accuracy": correct / len(outputs),
         "count_correct_both1": float(cat_110),
         "count_format1_answer0": float(cat_100),
         "count_format0_answer0": float(cat_000),
-        "n_examples": float(total),
+        "n_examples": float(len(outputs)),
     }
 
 
@@ -363,11 +293,10 @@ def main() -> None:
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--micro-batch-size", type=int, default=2)
     parser.add_argument("--global-batch-size", type=int, default=8)
-    parser.add_argument("--eval-every-steps", type=int, default=5)
+    parser.add_argument("--eval-every-steps", type=int, default=50)
     parser.add_argument("--max-train-steps", type=int, default=0)
     parser.add_argument("--max-eval-examples", type=int, default=256)
     parser.add_argument("--eval-max-tokens", type=int, default=1024)
-    parser.add_argument("--eval-generate-batch-size", type=int, default=8)
     parser.add_argument("--max-seq-len", type=int, default=256,
                         help="Truncate tokenized sequences to this length before the forward pass.")
     parser.add_argument("--policy-device", default="cuda:0")
@@ -459,7 +388,6 @@ def main() -> None:
     eval_step = 0
     best_val_acc = -1.0
     best_ckpt = None
-    eval_checkpoints: list[tuple[int, int, Path]] = []  # (eval_step, train_step, path)
 
     pbar = tqdm(total=args.max_train_steps if args.max_train_steps > 0 else None, desc="Training")
     for epoch in range(args.epochs):
@@ -526,12 +454,73 @@ def main() -> None:
 
                 need_eval = (train_step % args.eval_every_steps == 0)
                 if need_eval:
+                    model.eval()
+                    with vllm_eval_context(
+                        model_id=args.model_id,
+                        policy=model,
+                        policy_device=args.policy_device,
+                        vllm_device=args.vllm_device,
+                        seed=args.seed,
+                        gpu_memory_utilization=args.vllm_gpu_memory_utilization,
+                    ) as llm:
+                        val_metrics = evaluate_with_vllm(
+                            llm=llm,
+                            prompts=math_val_prompts,
+                            ground_truths=math_val_gts,
+                            max_examples=args.max_eval_examples,
+                            max_tokens=args.eval_max_tokens,
+                        )
                     eval_step += 1
-                    eval_ckpt = ckpt_dir / f"eval_step_{eval_step:05d}_train_step_{train_step:07d}"
-                    model.save_pretrained(eval_ckpt)
-                    tokenizer.save_pretrained(eval_ckpt)
-                    eval_checkpoints.append((eval_step, train_step, eval_ckpt))
-                    print(f"[checkpoint] saved {eval_ckpt.name} for post-training eval")
+
+                    if use_wandb:
+                        wandb.log(
+                            {
+                                "eval_step": eval_step,
+                                "eval/math_val_accuracy": val_metrics["accuracy"],
+                                "eval/math_val_count_correct_both1": val_metrics["count_correct_both1"],
+                                "eval/math_val_count_format1_answer0": val_metrics["count_format1_answer0"],
+                                "eval/math_val_count_format0_answer0": val_metrics["count_format0_answer0"],
+                            }
+                        )
+
+                    with csv_path.open("a", encoding="utf-8", newline="") as f:
+                        writer = csv.DictWriter(f, fieldnames=[
+                            "train_step",
+                            "eval_step",
+                            "train_loss",
+                            "eval_math_val_accuracy",
+                            "eval_intellect_test_accuracy",
+                            "eval_math_test_accuracy",
+                            "dataset_size",
+                            "lr",
+                            "global_batch_size",
+                            "micro_batch_size",
+                        ])
+                        writer.writerow({
+                            "train_step": train_step,
+                            "eval_step": eval_step,
+                            "train_loss": "",
+                            "eval_math_val_accuracy": val_metrics["accuracy"],
+                            "eval_intellect_test_accuracy": "",
+                            "eval_math_test_accuracy": "",
+                            "dataset_size": keep_n,
+                            "lr": args.lr,
+                            "global_batch_size": args.global_batch_size,
+                            "micro_batch_size": args.micro_batch_size,
+                        })
+
+                    if val_metrics["accuracy"] > best_val_acc:
+                        best_val_acc = val_metrics["accuracy"]
+                        best_ckpt = ckpt_dir / "best"
+                        model.save_pretrained(best_ckpt)
+                        tokenizer.save_pretrained(best_ckpt)
+
+                    if args.save_every_eval:
+                        eval_ckpt = ckpt_dir / f"eval_step_{eval_step}"
+                        model.save_pretrained(eval_ckpt)
+                        tokenizer.save_pretrained(eval_ckpt)
+
+                    model.train()
 
                 if args.max_train_steps > 0 and train_step >= args.max_train_steps:
                     break
@@ -541,98 +530,10 @@ def main() -> None:
 
     pbar.close()
 
-    # If no eval checkpoint was saved during training, save the final model as one eval point.
-    if not eval_checkpoints:
-        eval_step = 1
-        final_eval_ckpt = ckpt_dir / f"eval_step_{eval_step:05d}_train_step_{train_step:07d}"
-        model.save_pretrained(final_eval_ckpt)
-        tokenizer.save_pretrained(final_eval_ckpt)
-        eval_checkpoints.append((eval_step, train_step, final_eval_ckpt))
-
-    # Post-training evaluation over saved checkpoints to build validation curves.
-    print(f"\n[posthoc-eval] evaluating {len(eval_checkpoints)} checkpoints...")
-    model.to("cpu")
-    del model
-    torch.cuda.empty_cache()
-
-    for checkpoint_eval_step, checkpoint_train_step, checkpoint_path in eval_checkpoints:
-        eval_model = AutoModelForCausalLM.from_pretrained(
-            str(checkpoint_path),
-            trust_remote_code=True,
-            torch_dtype=torch.bfloat16,
-        ).cpu()
-        eval_model.eval()
-
-        with vllm_eval_context(
-            model_id=args.model_id,
-            policy=eval_model,          # CPU model
-            policy_device="cpu",        # IMPORTANT
-            vllm_device=args.vllm_device,
-            seed=args.seed,
-            gpu_memory_utilization=args.vllm_gpu_memory_utilization,
-            max_model_len=args.max_seq_len + args.eval_max_tokens,
-            max_num_seqs=1,
-        ) as llm:
-            val_metrics = evaluate_with_vllm(
-                llm=llm,
-                prompts=math_val_prompts,
-                ground_truths=math_val_gts,
-                max_examples=args.max_eval_examples,
-                max_tokens=args.eval_max_tokens,
-                generation_batch_size=args.eval_generate_batch_size,
-            )
-
-        del llm
-        import gc; gc.collect()
-        torch.cuda.empty_cache()
-
-        if use_wandb:
-            wandb.log(
-                {
-                    "eval_step": checkpoint_eval_step,
-                    "eval/math_val_accuracy": val_metrics["accuracy"],
-                    "eval/math_val_count_correct_both1": val_metrics["count_correct_both1"],
-                    "eval/math_val_count_format1_answer0": val_metrics["count_format1_answer0"],
-                    "eval/math_val_count_format0_answer0": val_metrics["count_format0_answer0"],
-                }
-            )
-
-        with csv_path.open("a", encoding="utf-8", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=[
-                "train_step",
-                "eval_step",
-                "train_loss",
-                "eval_math_val_accuracy",
-                "eval_intellect_test_accuracy",
-                "eval_math_test_accuracy",
-                "dataset_size",
-                "lr",
-                "global_batch_size",
-                "micro_batch_size",
-            ])
-            writer.writerow({
-                "train_step": checkpoint_train_step,
-                "eval_step": checkpoint_eval_step,
-                "train_loss": "",
-                "eval_math_val_accuracy": val_metrics["accuracy"],
-                "eval_intellect_test_accuracy": "",
-                "eval_math_test_accuracy": "",
-                "dataset_size": keep_n,
-                "lr": args.lr,
-                "global_batch_size": args.global_batch_size,
-                "micro_batch_size": args.micro_batch_size,
-            })
-
-        if val_metrics["accuracy"] > best_val_acc:
-            best_val_acc = val_metrics["accuracy"]
-            best_ckpt = checkpoint_path
-
-        del eval_model
-        torch.cuda.empty_cache()
-
     if best_ckpt is None:
-        # Fallback should not trigger because we always evaluate at least one checkpoint.
-        best_ckpt = eval_checkpoints[-1][2]
+        best_ckpt = ckpt_dir / "last"
+        model.save_pretrained(best_ckpt)
+        tokenizer.save_pretrained(best_ckpt)
 
     best_model = AutoModelForCausalLM.from_pretrained(
         str(best_ckpt),
@@ -648,8 +549,6 @@ def main() -> None:
         vllm_device=args.vllm_device,
         seed=args.seed,
         gpu_memory_utilization=args.vllm_gpu_memory_utilization,
-        max_model_len=args.max_seq_len + args.eval_max_tokens,
-        max_num_seqs=1,
     ) as llm:
         intellect_test_metrics = evaluate_with_vllm(
             llm=llm,
@@ -657,7 +556,6 @@ def main() -> None:
             ground_truths=intellect_test_gts,
             max_examples=args.max_eval_examples,
             max_tokens=args.eval_max_tokens,
-            generation_batch_size=args.eval_generate_batch_size,
         )
         math_test_metrics = evaluate_with_vllm(
             llm=llm,
@@ -665,12 +563,7 @@ def main() -> None:
             ground_truths=math_test_gts,
             max_examples=args.max_eval_examples,
             max_tokens=args.eval_max_tokens,
-            generation_batch_size=args.eval_generate_batch_size,
         )
-
-    del llm
-    import gc; gc.collect()
-    torch.cuda.empty_cache()
 
     summary = {
         "run_name": run_name,
@@ -682,7 +575,6 @@ def main() -> None:
         "train_steps": train_step,
         "best_val_accuracy": best_val_acc,
         "best_checkpoint": str(best_ckpt),
-        "posthoc_eval_points": len(eval_checkpoints),
         "intellect_test": intellect_test_metrics,
         "math_test": math_test_metrics,
         "metrics_csv": str(csv_path),
