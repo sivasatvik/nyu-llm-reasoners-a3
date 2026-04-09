@@ -162,3 +162,32 @@ cython_debug/
 .ruff_cache/
 *.zip
 .DS_Store
+
+# Latex build files
+*.aux
+*.lof
+*.log
+*.lot
+*.fls
+*.out
+*.toc
+*.fmt
+*.fot
+*.cb
+*.cb2
+*.lb
+# Bibliography auxiliary files
+*.bbl
+*.blg
+*-blx.aux
+*-blx.bib
+*.run.xml
+*.bcf
+
+# Build tool auxiliary files
+*.fdb_latexmk
+*.synctex
+*.synctex(busy)
+*.synctex.gz
+*.synctex.gz(busy)
+*.pdfsync
